@@ -23,6 +23,19 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Build & Test
+
+Python 3.13+, managed with [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync                 # install deps (streamlit; dev: pytest)
+uv run pytest           # run the test suite
+```
+
+The app's data lives in `finances.db` (SQLite, gitignored) in the project root;
+`housefin.db.connect()` creates and migrates it on first use. Tests use
+in-memory or temp-dir databases only.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

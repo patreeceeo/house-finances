@@ -60,13 +60,16 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Python 3.13+, managed with [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# Example:
-# npm install
-# npm test
+uv sync                 # install deps (streamlit; dev: pytest)
+uv run pytest           # run the test suite
 ```
+
+The app's data lives in `finances.db` (SQLite, gitignored) in the project root;
+`housefin.db.connect()` creates and migrates it on first use. Tests use
+in-memory or temp-dir databases only.
 
 ## Architecture Overview
 

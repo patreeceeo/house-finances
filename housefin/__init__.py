@@ -1,0 +1,1 @@
+"""House finances categorizer."""
