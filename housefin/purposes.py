@@ -62,7 +62,7 @@ def rename(conn: sqlite3.Connection, purpose_id: int, new_name: str) -> None:
     if is_protected(row):
         raise PurposeError(f"{row['name']} is built in and cannot be renamed.")
     name = _clean_name(conn, new_name, ignore_id=purpose_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute("UPDATE purposes SET name = ? WHERE id = ?", (name, purpose_id))
 
 
@@ -110,7 +110,7 @@ def delete(conn: sqlite3.Connection, purpose_id: int) -> None:
         raise PurposeError(
             f"{row['name']} is still used by {used}; recategorize those before deleting it."
         )
-    with conn:
+    with db.transaction(conn):
         conn.execute("DELETE FROM purpose_splits WHERE purpose_id = ?", (purpose_id,))
         conn.execute("DELETE FROM purposes WHERE id = ?", (purpose_id,))
 

@@ -29,26 +29,9 @@ REAPPLY_HELP = (
 )
 
 
-def sync_splits(result: rules.ApplyResult) -> None:
-    """Keep splits in line with purposes the rule engine changed."""
-    if not result.purpose_changed:
-        return
-    ids = list(result.purpose_changed)
-    marks = ",".join("?" * len(ids))
-    no_purpose = {
-        r["id"]
-        for r in conn.execute(
-            f"SELECT id FROM transactions WHERE id IN ({marks}) AND purpose_id IS NULL", ids
-        )
-    }
-    for txn_id in no_purpose:
-        splits.set_transaction_split(conn, txn_id, [])
-    splits.apply_default_split(conn, [i for i in ids if i not in no_purpose], replace=True)
-
-
 def done(msg: str, result: rules.ApplyResult | None, rule_id: int) -> None:
+    """Flash and rerun. Call after the transaction (st.rerun raises)."""
     if result is not None:
-        sync_splits(result)
         n, c = len(result.updated), len(result.cleared)
         msg += f" {n} transaction{'s' if n != 1 else ''} re-tagged"
         msg += f" ({c} now uncategorized)." if c else "."
@@ -152,15 +135,17 @@ edit_mode = st.radio(
 if st.button("Save rule", type="primary", key=f"rule_save_{rid}"):
     kind, tid = target
     try:
-        result = rules.update_rule(
-            conn,
-            rid,
-            pattern=pattern,
-            match_type=match_type,
-            person_id=tid if kind == "person" else None,
-            purpose_id=tid if kind == "purpose" else None,
-            reapply=edit_mode == REAPPLY,
-        )
+        with db.transaction(conn):  # rule change, re-tags and splits together
+            result = rules.update_rule(
+                conn,
+                rid,
+                pattern=pattern,
+                match_type=match_type,
+                person_id=tid if kind == "person" else None,
+                purpose_id=tid if kind == "purpose" else None,
+                reapply=edit_mode == REAPPLY,
+            )
+            splits.sync_after_rules(conn, result)
     except ValueError as exc:
         st.error(str(exc))
     else:
@@ -174,6 +159,8 @@ with st.expander("Delete rule"):
     )
     confirm = st.checkbox(f"Yes, delete “{rule.pattern}”", key=f"rule_del_confirm_{rid}")
     if st.button("Delete rule", disabled=not confirm, key=f"rule_delete_{rid}"):
-        result = rules.delete_rule(conn, rid, reapply=del_mode == REAPPLY)
+        with db.transaction(conn):
+            result = rules.delete_rule(conn, rid, reapply=del_mode == REAPPLY)
+            splits.sync_after_rules(conn, result)
         ss.pop("rules_selected", None)
         done("Rule deleted.", result if del_mode == REAPPLY else None, rid)

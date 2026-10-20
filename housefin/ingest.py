@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from . import rules, splits
+from . import db, rules, splits
 from .parsers import ParsedRow, ParseFormatError, RowError, detect_parser
 from .parsers.base import normalize_description
 
@@ -53,34 +53,6 @@ class FileReport:
     splits_written: int = 0
     near_duplicates: list[NearDuplicate] = field(default_factory=list)
     new_ids: list[int] = field(default_factory=list)
-
-
-class _NoCommit:
-    """Connection proxy for helpers that wrap their writes in ``with conn:``.
-
-    rules.py and splits.py commit through the context manager; routing them
-    through this proxy keeps their writes inside the import's transaction.
-    Exceptions still propagate, and the importer rolls back the real
-    connection.
-    """
-
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def commit(self) -> None:
-        pass
-
-    def rollback(self) -> None:
-        pass
 
 
 def file_sha256(data: bytes) -> str:
@@ -196,23 +168,20 @@ def ingest_file(conn: sqlite3.Connection, path: str | Path) -> FileReport:
     report.bad_rows = list(result.errors)
     report.rows_read = len(result.rows) + len(result.errors)
 
-    if conn.in_transaction:
-        conn.commit()  # start from a clean slate so rollback only drops this file
-    proxy = _NoCommit(conn)
+    # One transaction per file (a savepoint if the caller already opened one),
+    # so a failure drops only this file.
     try:
-        conn.execute("BEGIN")
-        new_ids, duplicates = _insert_rows(conn, result.rows, path.name)
-        applied = rules.apply_rules(proxy, new_ids)
-        report.splits_written = splits.apply_default_split(proxy, applied.purpose_changed)
-        report.near_duplicates = find_near_duplicates(conn, new_ids)
-        conn.execute(
-            "INSERT INTO imports (file_name, file_hash, rows_read, rows_new, rows_duplicate)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (path.name, report.file_hash, report.rows_read, len(new_ids), duplicates),
-        )
-        conn.commit()
+        with db.transaction(conn):
+            new_ids, duplicates = _insert_rows(conn, result.rows, path.name)
+            applied = rules.apply_rules(conn, new_ids)
+            report.splits_written = splits.sync_after_rules(conn, applied)
+            report.near_duplicates = find_near_duplicates(conn, new_ids)
+            conn.execute(
+                "INSERT INTO imports (file_name, file_hash, rows_read, rows_new, rows_duplicate)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (path.name, report.file_hash, report.rows_read, len(new_ids), duplicates),
+            )
     except Exception as e:
-        conn.rollback()
         report.near_duplicates = []
         report.message = f"import failed, nothing from this file was saved: {e!r}"
         return report

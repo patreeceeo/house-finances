@@ -115,7 +115,7 @@ def test_crash_mid_file_leaves_nothing(conn, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("simulated crash")
 
-    monkeypatch.setattr(splits, "apply_default_split", boom)
+    monkeypatch.setattr(splits, "sync_after_rules", boom)
     f = write_csv(tmp_path, "a.csv", NEWER)
     r = ingest.ingest_file(conn, f)
     assert r.status == ingest.FAILED
@@ -128,7 +128,7 @@ def test_crash_mid_file_leaves_nothing(conn, tmp_path, monkeypatch):
 
 
 def test_crash_after_rules_commit_attempt_rolls_back(conn, tmp_path, monkeypatch):
-    # rules.apply_rules uses `with conn:`; it must not commit the import early.
+    # rules.apply_rules opens its own db.transaction; it must not commit the import early.
     orig = rules.apply_rules
 
     def apply_then_crash(c, ids):

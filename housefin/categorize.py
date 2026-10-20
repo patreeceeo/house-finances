@@ -5,12 +5,15 @@ overwrite it. A save can also:
 
 * store an explicit split (``weights``) and, with ``remember_split``, make it
   the purpose's default for future transactions (past ones are untouched);
+  the split's source (``transactions.split_source``) says whether it is the
+  purpose default or set by hand (see :func:`_save_split`);
 * Remember the description as a rule (``remember=True``), which tags every
   other *uncategorized* matching row. Rows tagged that way get their purpose's
   default split (``apply_default_split(replace=True)``): they were
   uncategorized, so any split rows they had are stale, never a manual split.
 
-Order inside a save matters and is: tag the row -> write its split (and the
+Each save is one transaction (``db.transaction``): if any step fails, nothing
+from it is kept. Order inside a save matters and is: tag the row -> write its split (and the
 remembered default) -> create the rule -> default splits for rows the rule
 tagged. So rows tagged by a new rule start from the split just remembered.
 
@@ -164,17 +167,17 @@ def set_applies_month(conn: sqlite3.Connection, txn_id: int, month: str | None) 
     """
     month = validate_month(month)
     get_transaction(conn, txn_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute("UPDATE transactions SET applies_month = ? WHERE id = ?", (month, txn_id))
 
 
 def _tag(conn, txn_id, person_id, purpose_id, applies_month) -> None:
-    with conn:
-        conn.execute(
-            "UPDATE transactions SET person_id = ?, purpose_id = ?, category_source = 'manual'"
-            " WHERE id = ?",
-            (person_id, purpose_id, txn_id),
-        )
+    """Mark the row manual (callers wrap the whole save in a transaction)."""
+    conn.execute(
+        "UPDATE transactions SET person_id = ?, purpose_id = ?, category_source = 'manual'"
+        " WHERE id = ?",
+        (person_id, purpose_id, txn_id),
+    )
     if applies_month is not KEEP:
         set_applies_month(conn, txn_id, applies_month)
 
@@ -183,25 +186,10 @@ def _remember(conn, txn_id, pattern, *, person_id=None, purpose_id=None) -> Save
     rule_id, result = rules.create_rule_from_transaction(
         conn, txn_id, pattern=pattern, person_id=person_id, purpose_id=purpose_id
     )
-    _sync_splits(conn, result)
+    # replace=True inside is safe: create_rule only tags uncategorized rows,
+    # so any split rows they had are stale, never a manual split.
+    splits.sync_after_rules(conn, result)
     return SaveResult(rule_id, len(result.updated), list(result.updated))
-
-
-def _sync_splits(conn: sqlite3.Connection, result: rules.ApplyResult) -> None:
-    """Splits for rows a rule just (re)tagged: the new purpose's default split,
-    or no split when the purpose became NULL (e.g. re-tagged to a person).
-
-    replace=True is safe: create_rule only tags uncategorized rows, so any
-    split rows they had are stale, never a manual split.
-    """
-    with_purpose = []
-    with conn:
-        for i in result.purpose_changed:
-            if get_transaction(conn, i)["purpose_id"] is None:
-                conn.execute("DELETE FROM splits WHERE transaction_id = ?", (i,))
-            else:
-                with_purpose.append(i)
-    splits.apply_default_split(conn, with_purpose, replace=True)
 
 
 def _check_purpose(conn, purpose_id) -> sqlite3.Row:
@@ -215,19 +203,49 @@ def _save_purposed(
     conn, txn_id, purpose_id, weights, remember_split, remember, pattern, applies_month
 ) -> SaveResult:
     purpose = _check_purpose(conn, purpose_id)
-    _tag(conn, txn_id, None, purpose_id, applies_month)
-    if purpose["excluded"]:
-        with conn:
-            conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn_id,))
-    elif weights is None:
-        splits.apply_default_split(conn, [txn_id], replace=True)
-    else:
-        splits.set_transaction_split(
-            conn, txn_id, weights, remember_for_purpose=remember_split
-        )
-    if remember:
-        return _remember(conn, txn_id, pattern, purpose_id=purpose_id)
+    with db.transaction(conn):
+        before = get_transaction(conn, txn_id)
+        _tag(conn, txn_id, None, purpose_id, applies_month)
+        if purpose["excluded"]:
+            splits.clear_split(conn, txn_id)
+        elif weights is None:
+            splits.apply_default_split(conn, [txn_id], replace=True)
+        else:
+            _save_split(conn, before, purpose_id, weights, remember_split)
+        if remember:
+            return _remember(conn, txn_id, pattern, purpose_id=purpose_id)
     return SaveResult()
+
+
+def _save_split(conn, before, purpose_id, weights, remember_split) -> None:
+    """Store editor ``weights`` for a row being tagged with ``purpose_id``.
+
+    Split editors always send their weights, edited or not, so the source is
+    worked out from what they match (compared as percents):
+
+    * the row keeps its purpose and the weights equal its stored split ->
+      left exactly as it is (same rows, same source);
+    * the weights equal the purpose's default for the row's month -> stored
+      with source 'default';
+    * anything else -> 'manual' (set by hand).
+
+    ``remember_split`` makes the weights the purpose default either way.
+    """
+    txn_id = before["id"]
+    if before["purpose_id"] == purpose_id:
+        stored = [
+            (r["person_id"], r["weight"]) for r in splits.get_transaction_split(conn, txn_id)
+        ]
+        if stored and splits.same_split(stored, weights):
+            if remember_split:
+                splits.set_purpose_split(conn, purpose_id, weights)
+            return
+    month = splits.transaction_month(get_transaction(conn, txn_id))  # after applies_month
+    default = splits.default_split_for(conn, purpose_id, month)
+    source = splits.DEFAULT if splits.same_split(default, weights) else splits.MANUAL
+    splits.set_transaction_split(
+        conn, txn_id, weights, remember_for_purpose=remember_split, source=source
+    )
 
 
 def save_deposit(
@@ -249,11 +267,11 @@ def save_deposit(
         raise ValueError("only deposits are tagged to a person")
     if conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
         raise ValueError("pick a person")
-    _tag(conn, txn_id, person_id, None, applies_month)
-    with conn:
-        conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn_id,))
-    if remember:
-        return _remember(conn, txn_id, pattern, person_id=person_id)
+    with db.transaction(conn):
+        _tag(conn, txn_id, person_id, None, applies_month)
+        splits.clear_split(conn, txn_id)
+        if remember:
+            return _remember(conn, txn_id, pattern, person_id=person_id)
     return SaveResult()
 
 
@@ -313,13 +331,13 @@ def clear_tags(conn: sqlite3.Connection, txn_id: int) -> None:
     tag it). The applies_month override is kept.
     """
     get_transaction(conn, txn_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute(
             "UPDATE transactions SET person_id = NULL, purpose_id = NULL,"
             " category_source = NULL WHERE id = ?",
             (txn_id,),
         )
-        conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn_id,))
+        splits.clear_split(conn, txn_id)
 
 
 # --- split editor helpers --------------------------------------------------------
@@ -336,6 +354,18 @@ def split_candidates(
         if p["is_house"] or db.is_active(p, month) or p["id"] in in_current
     ]
     return sorted(people, key=lambda p: (p["is_house"], p["name"].casefold()))
+
+
+def split_origin(
+    conn: sqlite3.Connection, txn: sqlite3.Row, purpose_id: int | None
+) -> str | None:
+    """Where the split editor's starting weights (:func:`initial_weights`) come
+    from: the stored split's source ('default' or 'manual') when the editor
+    shows the stored split, else None (it starts from the purpose default)."""
+    if purpose_id is not None and purpose_id == txn["purpose_id"]:
+        if splits.get_transaction_split(conn, txn["id"]):
+            return splits.get_split_source(conn, txn["id"]) or splits.MANUAL
+    return None
 
 
 def initial_weights(

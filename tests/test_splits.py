@@ -239,3 +239,65 @@ def test_percent_total_error():
     assert splits.percent_total_error([33.33, 33.33, 33.34]) is None
     assert "5% is still unassigned" in splits.percent_total_error([60, 35])
     assert "take off 10%" in splits.percent_total_error([60, 50])
+
+
+# --- sync_after_rules -------------------------------------------------------------
+
+
+def _set_purpose(conn, txn_id, purpose_id):
+    with conn:
+        conn.execute("UPDATE transactions SET purpose_id = ? WHERE id = ?", (purpose_id, txn_id))
+
+
+def test_sync_after_rules_recomputes_clears_and_skips_excluded(conn):
+    from housefin import rules
+
+    a = db.add_person(conn, "Alice")
+    b = db.add_person(conn, "Bob")
+    rent = db.get_purpose_id(conn, "Rent")
+    costco = db.get_purpose_id(conn, "Costco")
+    transfer = db.get_transfer_purpose_id(conn)
+    splits.set_purpose_split(conn, rent, [(a, 75), (b, 25)])
+
+    # Each starts with a stale split, then a "rule" changes its purpose.
+    retagged = _txn(conn, -1000, purpose_id=costco)
+    to_null = _txn(conn, -1000, purpose_id=costco)
+    to_transfer = _txn(conn, -1000, purpose_id=costco)
+    untouched = _txn(conn, -1000, purpose_id=costco)
+    for t in (retagged, to_null, to_transfer, untouched):
+        splits.set_transaction_split(conn, t, [(a, 1)])
+    _set_purpose(conn, retagged, rent)
+    _set_purpose(conn, to_null, None)
+    _set_purpose(conn, to_transfer, transfer)
+
+    result = rules.ApplyResult(
+        updated=[retagged, to_null, to_transfer],
+        purpose_changed=[retagged, to_null, to_transfer],
+    )
+    assert splits.sync_after_rules(conn, result) == 1
+    assert _shares(conn, retagged) == {a: 750, b: 250}  # replaced, not kept
+    assert _shares(conn, to_null) == {}
+    assert _shares(conn, to_transfer) == {}
+    assert _shares(conn, untouched) == {a: 1000}
+
+
+def test_sync_after_rules_accepts_ids_and_empty(conn):
+    a = db.add_person(conn, "Alice")
+    rent = db.get_purpose_id(conn, "Rent")
+    t = _txn(conn, -500, purpose_id=rent)
+    assert splits.sync_after_rules(conn, []) == 0
+    assert _shares(conn, t) == {}
+    assert splits.sync_after_rules(conn, [t]) == 1
+    assert _shares(conn, t) == {a: 500}
+
+
+def test_sync_after_rules_joins_caller_transaction(conn):
+    a = db.add_person(conn, "Alice")
+    rent = db.get_purpose_id(conn, "Rent")
+    t = _txn(conn, -500, purpose_id=rent)
+    with pytest.raises(RuntimeError):
+        with db.transaction(conn):
+            splits.sync_after_rules(conn, [t])
+            assert _shares(conn, t) == {a: 500}
+            raise RuntimeError("caller fails later")
+    assert _shares(conn, t) == {}

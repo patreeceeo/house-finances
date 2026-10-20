@@ -11,6 +11,8 @@ import datetime as _dt
 import re
 import sqlite3
 
+from housefin import db
+
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
@@ -137,7 +139,7 @@ def add_person(conn: sqlite3.Connection, name: str, active_from: str | None = No
     """Add a housemate. They are not added to any remembered split."""
     name = _clean_name(conn, name)
     active_from = check_month(active_from)
-    with conn:
+    with db.transaction(conn):
         cur = conn.execute(
             "INSERT INTO people (name, active_from) VALUES (?, ?)", (name, active_from)
         )
@@ -148,7 +150,7 @@ def rename_person(conn: sqlite3.Connection, person_id: int, name: str) -> None:
     """Rename anyone, the House included; history follows (it is keyed by id)."""
     get_person(conn, person_id)
     name = _clean_name(conn, name, exclude_id=person_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute("UPDATE people SET name = ? WHERE id = ?", (name, person_id))
 
 
@@ -160,7 +162,7 @@ def set_active_from(conn: sqlite3.Connection, person_id: int, month: str | None)
     until = person["active_until"]
     if month and until and month > until:
         raise PersonError("Active from cannot be after the move-out month.")
-    with conn:
+    with db.transaction(conn):
         conn.execute("UPDATE people SET active_from = ? WHERE id = ?", (month, person_id))
 
 
@@ -176,14 +178,14 @@ def move_out(conn: sqlite3.Connection, person_id: int, last_month: str) -> None:
     start = person["active_from"]
     if start and last_month < start:
         raise PersonError("The move-out month cannot be before their Active from month.")
-    with conn:
+    with db.transaction(conn):
         conn.execute("UPDATE people SET active_until = ? WHERE id = ?", (last_month, person_id))
 
 
 def clear_move_out(conn: sqlite3.Connection, person_id: int) -> None:
     """Undo a move-out (they become current again)."""
     get_person(conn, person_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute("UPDATE people SET active_until = NULL WHERE id = ?", (person_id,))
 
 
@@ -197,7 +199,7 @@ def set_active_range(
     active_from, active_until = check_month(active_from), check_month(active_until)
     if active_from and active_until and active_from > active_until:
         raise PersonError("Active from cannot be after Active until.")
-    with conn:
+    with db.transaction(conn):
         conn.execute(
             "UPDATE people SET active_from = ?, active_until = ? WHERE id = ?",
             (active_from, active_until, person_id),
@@ -210,7 +212,7 @@ def delete_person(conn: sqlite3.Connection, person_id: int) -> None:
     reason = delete_blocker(conn, person_id)
     if reason:
         raise PersonError(reason)
-    with conn:
+    with db.transaction(conn):
         conn.execute("DELETE FROM purpose_splits WHERE person_id = ?", (person_id,))
         conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
 

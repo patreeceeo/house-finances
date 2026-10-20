@@ -32,6 +32,7 @@ def add_txn(conn, description, amount_cents, *, source=None, person_id=None, pur
             source,
         ),
     )
+    conn.commit()  # db.transaction joins an open transaction instead of committing it
     return cur.lastrowid
 
 

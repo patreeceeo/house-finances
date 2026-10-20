@@ -239,6 +239,22 @@ with st.container(border=True):
             else:
                 st.warning("Nobody is in the split; save would leave it unsplit.")
             edited = dict(weights) != init_map
+            # Mirror categorize._save_split: unedited keeps the stored split's
+            # source (or is the purpose default); edited is 'manual' unless it
+            # matches the default again.
+            origin = None if purpose_id == NEW else categorize.split_origin(conn, fake, purpose_id)
+            if not edited:
+                saved_as = origin or splits.DEFAULT
+            else:
+                default_w = init if origin is None else splits.default_split_for(conn, purpose_id, month)
+                saved_as = splits.DEFAULT if weights and splits.same_split(default_w, weights) else splits.MANUAL
+            if weights:
+                if saved_as == splits.MANUAL:
+                    st.caption("Split set by hand." if not edited else "Edited: saves as a split set by hand.")
+                elif origin == splits.DEFAULT and not edited:
+                    st.caption(f"Default split for {purpose_label}, as it was when saved.")
+                else:
+                    st.caption(f"Default split for {purpose_label}.")
             if edited:
                 noun = "refunds" if is_deposit else "withdrawals"
                 remember_split = st.checkbox(
@@ -298,25 +314,26 @@ if save:
             raise ValueError(split_error)
         if remember and not pattern.strip():
             raise ValueError("Enter a pattern, or untick Remember.")
-        if person_id == NEW or purpose_id == NEW:
-            name = new_name.strip()
-            if not name:
-                raise ValueError("Enter a name for the new value.")
-            if person_id == NEW:
-                existing = db.get_person_by_name(conn, name)
-                person_id = existing["id"] if existing else db.add_person(conn, name)
+        with db.transaction(conn):  # an inline-added value is kept only if the save works
+            if person_id == NEW or purpose_id == NEW:
+                name = new_name.strip()
+                if not name:
+                    raise ValueError("Enter a name for the new value.")
+                if person_id == NEW:
+                    existing = db.get_person_by_name(conn, name)
+                    person_id = existing["id"] if existing else db.add_person(conn, name)
+                else:
+                    existing = db.get_purpose(conn, name)
+                    purpose_id = existing["id"] if existing else db.add_purpose(conn, name)
+            kwargs = dict(remember=remember, pattern=pattern, applies_month=applies or None)
+            if is_deposit and not refund:
+                result = categorize.save_deposit(conn, tid, person_id, **kwargs)
             else:
-                existing = db.get_purpose(conn, name)
-                purpose_id = existing["id"] if existing else db.add_purpose(conn, name)
-        kwargs = dict(remember=remember, pattern=pattern, applies_month=applies or None)
-        if is_deposit and not refund:
-            result = categorize.save_deposit(conn, tid, person_id, **kwargs)
-        else:
-            save_fn = categorize.save_refund if is_deposit else categorize.save_withdrawal
-            result = save_fn(
-                conn, tid, purpose_id, weights,
-                remember_split=edited and remember_split, **kwargs,
-            )
+                save_fn = categorize.save_refund if is_deposit else categorize.save_withdrawal
+                result = save_fn(
+                    conn, tid, purpose_id, weights,
+                    remember_split=edited and remember_split, **kwargs,
+                )
     except ValueError as exc:
         st.error(str(exc))
     else:

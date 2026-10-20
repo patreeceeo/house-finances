@@ -7,6 +7,8 @@ Booleans are stored as 0/1 integers.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "finances.db"
@@ -111,7 +113,21 @@ INSERT INTO rules (match_type, pattern, applies_to, person_id)
     SELECT 'exact', 'Interest Paid', 'deposit', id FROM people WHERE is_house = 1;
 """
 
-MIGRATIONS: list[str] = [_SCHEMA_V1, _SEED_INTEREST_RULE_V2]
+# v3: where a transaction's split came from. 'default' = written from the
+# purpose's default split (housefin.splits.apply_default_split), 'manual' =
+# set by hand in a split editor, NULL = no split. Backfill: rows tagged by a
+# rule only ever got default splits, so 'default'; any other row with split
+# rows gets 'manual' (before v3 every existing split was treated as manual,
+# so this keeps those splits protected from being recomputed).
+_SPLIT_SOURCE_V3 = """
+ALTER TABLE transactions ADD COLUMN split_source TEXT
+    CHECK (split_source IN ('default', 'manual'));
+UPDATE transactions
+   SET split_source = CASE WHEN category_source = 'rule' THEN 'default' ELSE 'manual' END
+ WHERE id IN (SELECT transaction_id FROM splits);
+"""
+
+MIGRATIONS: list[str] = [_SCHEMA_V1, _SEED_INTEREST_RULE_V2, _SPLIT_SOURCE_V3]
 
 
 def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -125,6 +141,37 @@ def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     migrate(conn)
     return conn
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Group writes so they all land or none do.
+
+    Outermost use: BEGIN, then COMMIT on success or ROLLBACK on error. Inside
+    a transaction that is already open (``conn.in_transaction``, e.g. a caller
+    grouping several steps), it joins it through a SAVEPOINT instead: nothing
+    is committed here, and on error only this block's writes are undone before
+    the exception propagates. Use this instead of ``with conn:``, which commits
+    whatever transaction the caller has open.
+    """
+    if not conn.in_transaction:
+        conn.execute("BEGIN")
+        try:
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()
+        return
+    conn.execute("SAVEPOINT housefin")
+    try:
+        yield conn
+    except BaseException:
+        if conn.in_transaction:  # SQLite may already have rolled everything back
+            conn.execute("ROLLBACK TO housefin")
+            conn.execute("RELEASE housefin")
+        raise
+    conn.execute("RELEASE housefin")
 
 
 def schema_version(conn: sqlite3.Connection) -> int:
@@ -145,7 +192,7 @@ def migrate(conn: sqlite3.Connection) -> None:
 def _seed_purposes(conn: sqlite3.Connection) -> None:
     """Starter purposes plus built-in Transfer; only on a brand-new DB so later
     user edits (renames, deletions) are not undone on the next connect."""
-    with conn:
+    with transaction(conn):
         conn.executemany(
             "INSERT OR IGNORE INTO purposes (name, excluded) VALUES (?, ?)",
             [(name, 0) for name in DEFAULT_PURPOSES] + [(TRANSFER, 1)],
@@ -154,7 +201,7 @@ def _seed_purposes(conn: sqlite3.Connection) -> None:
 
 def _ensure_house(conn: sqlite3.Connection) -> None:
     """The House cannot be deleted, so recreate it if it is ever missing."""
-    with conn:
+    with transaction(conn):
         if conn.execute("SELECT 1 FROM people WHERE is_house = 1").fetchone() is None:
             conn.execute("INSERT INTO people (name, is_house) VALUES (?, 1)", (HOUSE_NAME,))
 
@@ -206,7 +253,7 @@ def add_person(
     active_from: str | None = None,
     active_until: str | None = None,
 ) -> int:
-    with conn:
+    with transaction(conn):
         cur = conn.execute(
             "INSERT INTO people (name, active_from, active_until) VALUES (?, ?, ?)",
             (name, active_from, active_until),
@@ -239,7 +286,7 @@ def get_transfer_purpose_id(conn: sqlite3.Connection) -> int:
 
 
 def add_purpose(conn: sqlite3.Connection, name: str, *, excluded: bool = False) -> int:
-    with conn:
+    with transaction(conn):
         cur = conn.execute(
             "INSERT INTO purposes (name, excluded) VALUES (?, ?)", (name, int(excluded))
         )

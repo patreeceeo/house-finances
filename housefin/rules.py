@@ -27,6 +27,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from housefin import db
 from housefin.parsers.base import normalize_description
 
 EXACT = "exact"
@@ -192,7 +193,7 @@ def create_rule(
     existing = next(
         (r for r in all_rules(conn) if _same_key(r, match_type, pattern, applies_to)), None
     )
-    with conn:
+    with db.transaction(conn):
         if existing:
             rule_id = existing.id
             conn.execute(
@@ -206,7 +207,7 @@ def create_rule(
                 (match_type, pattern, applies_to, person_id, purpose_id),
             )
             rule_id = cur.lastrowid
-    result = apply_rules(conn) if apply else ApplyResult()
+        result = apply_rules(conn) if apply else ApplyResult()
     return rule_id, result
 
 
@@ -275,16 +276,16 @@ def update_rule(
     if person_id is None and purpose_id is None:
         person_id, purpose_id = old.person_id, old.purpose_id
     new_pattern = _validate(new_type, new_pattern, old.applies_to, person_id, purpose_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute(
             "UPDATE rules SET match_type = ?, pattern = ?, person_id = ?, purpose_id = ?"
             " WHERE id = ?",
             (new_type, new_pattern, person_id, purpose_id, rule_id),
         )
-    if not reapply:
-        return ApplyResult()
-    new = get_rule(conn, rule_id)
-    return _reevaluate(conn, [old, new])
+        if not reapply:
+            return ApplyResult()
+        new = get_rule(conn, rule_id)
+        return _reevaluate(conn, [old, new])
 
 
 def delete_rule(conn: sqlite3.Connection, rule_id: int, *, reapply: bool = False) -> ApplyResult:
@@ -293,9 +294,9 @@ def delete_rule(conn: sqlite3.Connection, rule_id: int, *, reapply: bool = False
     old = get_rule(conn, rule_id)
     if old is None:
         raise KeyError(rule_id)
-    with conn:
+    with db.transaction(conn):
         conn.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
-    return _reevaluate(conn, [old]) if reapply else ApplyResult()
+        return _reevaluate(conn, [old]) if reapply else ApplyResult()
 
 
 def reapply_rule(conn: sqlite3.Connection, rule_id: int) -> ApplyResult:
@@ -365,7 +366,7 @@ def _retag(
     clear_unmatched: bool,
 ) -> ApplyResult:
     result = ApplyResult()
-    with conn:
+    with db.transaction(conn):
         for row in rows:
             if row["category_source"] == "manual":
                 continue

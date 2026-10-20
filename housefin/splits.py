@@ -19,6 +19,14 @@ consumers (Balances) simply ignore the House row. Purposes with
 
 A transaction's month is ``applies_month`` if set, otherwise the month of its
 ``date`` (see :data:`TXN_MONTH_SQL`).
+
+Where a split came from is kept in ``transactions.split_source``:
+``'default'`` (written from the purpose's default split by
+:func:`apply_default_split`), ``'manual'`` (set by hand,
+:func:`set_transaction_split`) or NULL (no split). Every function here that
+writes or removes split rows keeps it in step; other modules remove a split
+with :func:`clear_split`. Rows saved before the column existed with split rows
+but no source (only possible from raw SQL) are treated as manual.
 """
 
 from __future__ import annotations
@@ -30,6 +38,9 @@ from fractions import Fraction
 from housefin import db
 
 Weights = Sequence[tuple[int, float]]
+
+DEFAULT = "default"
+MANUAL = "manual"
 
 # SQL expression for a transaction's effective month; use with alias ``t``.
 TXN_MONTH_SQL = "COALESCE(t.applies_month, substr(t.date, 1, 7))"
@@ -98,6 +109,12 @@ def percent_total_error(percents: Iterable[float]) -> str | None:
     return f"Percents total {total:g}%; {round(100 - total, 2):g}% is still unassigned."
 
 
+def same_split(a: Weights, b: Weights) -> bool:
+    """Whether two weight lists divide an amount the same way (compared as the
+    percents a split editor shows, so 1/1/1 equals 33.34/33.33/33.33)."""
+    return to_percents(_clean(a)) == to_percents(_clean(b))
+
+
 def transaction_month(row: sqlite3.Row | dict) -> str:
     """Effective 'YYYY-MM' of a transactions row."""
     return row["applies_month"] or row["date"][:7]
@@ -120,7 +137,7 @@ def set_purpose_split(conn: sqlite3.Connection, purpose_id: int, weights: Weight
     the even-split fallback). Zero weights are dropped. Past transactions are
     not touched."""
     weights = _clean(weights)
-    with conn:
+    with db.transaction(conn):
         conn.execute("DELETE FROM purpose_splits WHERE purpose_id = ?", (purpose_id,))
         conn.executemany(
             "INSERT INTO purpose_splits (purpose_id, person_id, weight) VALUES (?, ?, ?)",
@@ -183,7 +200,8 @@ def get_transaction_split(conn: sqlite3.Connection, txn_id: int) -> list[sqlite3
 
 def _get_txn(conn: sqlite3.Connection, txn_id: int) -> sqlite3.Row:
     row = conn.execute(
-        "SELECT id, amount_cents, date, applies_month, purpose_id FROM transactions WHERE id = ?",
+        "SELECT id, amount_cents, date, applies_month, purpose_id, split_source"
+        " FROM transactions WHERE id = ?",
         (txn_id,),
     ).fetchone()
     if row is None:
@@ -191,11 +209,29 @@ def _get_txn(conn: sqlite3.Connection, txn_id: int) -> sqlite3.Row:
     return row
 
 
-def _write_split(conn: sqlite3.Connection, txn: sqlite3.Row, weights: Weights) -> None:
-    """Replace the split rows (no commit). Empty weights -> no split."""
-    conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn["id"],))
+def get_split_source(conn: sqlite3.Connection, txn_id: int) -> str | None:
+    """``'default'``, ``'manual'`` or None (no split) for a transaction."""
+    return _get_txn(conn, txn_id)["split_source"]
+
+
+def clear_split(conn: sqlite3.Connection, txn_id: int) -> None:
+    """Remove a transaction's split and its source. No transaction of its own:
+    callers already inside one (``db.transaction``) use it as a single step."""
+    conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn_id,))
+    conn.execute("UPDATE transactions SET split_source = NULL WHERE id = ?", (txn_id,))
+
+
+def _write_split(
+    conn: sqlite3.Connection, txn: sqlite3.Row, weights: Weights, source: str
+) -> None:
+    """Replace the split rows and record ``source`` (no commit). Empty weights
+    -> no split (source NULL)."""
+    if source not in (DEFAULT, MANUAL):
+        raise ValueError(f"unknown split source {source!r}")
+    clear_split(conn, txn["id"])
     if not weights:
         return
+    conn.execute("UPDATE transactions SET split_source = ? WHERE id = ?", (source, txn["id"]))
     shares = dict(compute_shares(-txn["amount_cents"], weights))
     conn.executemany(
         "INSERT INTO splits (transaction_id, person_id, weight, share_cents) VALUES (?, ?, ?, ?)",
@@ -209,50 +245,100 @@ def set_transaction_split(
     weights: Weights,
     *,
     remember_for_purpose: bool = False,
+    source: str = MANUAL,
 ) -> None:
-    """Save a (manual) split for one transaction, computing share_cents.
+    """Save a split for one transaction, computing share_cents.
 
-    Zero weights are dropped; empty ``weights`` removes the split. With
+    Zero weights are dropped; empty ``weights`` removes the split. ``source``
+    is recorded as the split's origin: 'manual' (set by hand, the default) or
+    'default' (the caller knows these weights are the purpose default). With
     ``remember_for_purpose`` the weights also become the default split of the
-    transaction's current purpose (other transactions are not changed).
+    transaction's current purpose (other transactions are not changed, not
+    even ones whose split came from the old default).
     """
     weights = _clean(weights)
     txn = _get_txn(conn, txn_id)
-    with conn:
-        _write_split(conn, txn, weights)
-    if remember_for_purpose and txn["purpose_id"] is not None and weights:
-        set_purpose_split(conn, txn["purpose_id"], weights)
+    with db.transaction(conn):
+        _write_split(conn, txn, weights, source)
+        if remember_for_purpose and txn["purpose_id"] is not None and weights:
+            set_purpose_split(conn, txn["purpose_id"], weights)
 
 
 def apply_default_split(
     conn: sqlite3.Connection, txn_ids: Iterable[int], *, replace: bool = False
 ) -> int:
-    """Give newly purposed transactions their purpose's default split.
+    """Give transactions their purpose's default split (source 'default').
 
-    For each id: no purpose -> skipped; excluded purpose (Transfer) -> any
-    split is removed; a transaction that already has split rows is treated
-    as manually split and skipped unless ``replace=True`` (use that when the
-    purpose itself changed). Returns how many transactions got a split written.
+    Call it for rows whose purpose was just set or changed. For each id: no
+    purpose -> skipped; excluded purpose (Transfer) -> any split is removed; a
+    split set by hand (source 'manual', or split rows with no source) is kept
+    unless ``replace=True`` (use that when the purpose itself changed: the old
+    split belongs to the old purpose and is stale). Anything else (no split,
+    or a split that came from a default) gets the purpose's current default.
+
+    Not for re-applying an edited purpose default to past transactions:
+    changing a default never changes existing splits, so don't pass ids whose
+    purpose did not change. Returns how many transactions got a split written.
     """
     written = 0
-    with conn:
+    with db.transaction(conn):
         for txn_id in txn_ids:
             txn = _get_txn(conn, txn_id)
             if txn["purpose_id"] is None:
                 continue
             if _is_excluded(conn, txn["purpose_id"]):
-                conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn_id,))
+                clear_split(conn, txn_id)
                 continue
-            has_split = conn.execute(
-                "SELECT 1 FROM splits WHERE transaction_id = ? LIMIT 1", (txn_id,)
-            ).fetchone()
-            if has_split and not replace:
+            if not replace and _is_manual(conn, txn):
                 continue
             weights = default_split_for(conn, txn["purpose_id"], transaction_month(txn))
-            _write_split(conn, txn, weights)
+            _write_split(conn, txn, weights, DEFAULT)
             if weights:
                 written += 1
     return written
+
+
+def _is_manual(conn: sqlite3.Connection, txn: sqlite3.Row) -> bool:
+    if txn["split_source"] == MANUAL:
+        return True
+    if txn["split_source"] == DEFAULT:
+        return False
+    # No recorded source: split rows written outside this module count as manual.
+    return conn.execute(
+        "SELECT 1 FROM splits WHERE transaction_id = ? LIMIT 1", (txn["id"],)
+    ).fetchone() is not None
+
+
+def sync_after_rules(conn: sqlite3.Connection, changed) -> int:
+    """Bring splits in line after a rule operation changed purposes.
+
+    ``changed`` is a ``rules.ApplyResult`` (anything with ``purpose_changed``)
+    or an iterable of transaction ids whose purpose changed. For each: purpose
+    now NULL -> split removed; excluded purpose (Transfer) -> split removed;
+    otherwise the purpose's default split replaces whatever was there
+    (``replace=True``: the purpose changed, so the old split is stale). Rule
+    operations never touch manual rows, so no manual split is overwritten.
+
+    Runs in one ``db.transaction`` (a savepoint inside a caller's). Returns how
+    many transactions got a split written.
+    """
+    ids = list(getattr(changed, "purpose_changed", changed))
+    if not ids:
+        return 0
+    with db.transaction(conn):
+        marks = ",".join("?" * len(ids))
+        no_purpose = {
+            r[0]
+            for r in conn.execute(
+                f"SELECT id FROM transactions WHERE id IN ({marks}) AND purpose_id IS NULL",
+                ids,
+            )
+        }
+        for i in no_purpose:
+            clear_split(conn, i)
+        return apply_default_split(
+            conn, [i for i in ids if i not in no_purpose], replace=True
+        )
 
 
 # --- reporting -------------------------------------------------------------------
