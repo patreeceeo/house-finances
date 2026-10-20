@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "house_finances",
+  "project_id": "4248cbcd-24f2-4906-8433-b372357be592"
+}
