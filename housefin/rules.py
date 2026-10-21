@@ -16,9 +16,6 @@ Matching (spec "Categorization and remembered rules"):
 - contains: pattern is a case-insensitive substring (both whitespace-collapsed).
 - A rule only matches transactions of its ``applies_to`` sign.
 - Precedence: exact first, then the longest contains pattern, then newest.
-- Descriptions that hide the sender or are mixed-purpose (Venmo cashouts,
-  eCheck deposits, internet transfers) are tagged by hand: no rule is offered
-  for them and no rule ever matches them.
 """
 
 from __future__ import annotations
@@ -34,10 +31,6 @@ EXACT = "exact"
 CONTAINS = "contains"
 DEPOSIT = "deposit"
 WITHDRAWAL = "withdrawal"
-
-# Case-insensitive substrings of descriptions that are always tagged by hand
-# (spec open questions 2 and 3).
-_NO_RULE_MARKERS = ("venmo cashout", "echeck deposit", "internet transfer")
 
 
 @dataclass(frozen=True)
@@ -63,7 +56,7 @@ class Rule:
         )
 
     def matches(self, description: str, amount_cents: int) -> bool:
-        if sign_of(amount_cents) != self.applies_to or not rule_allowed(description):
+        if sign_of(amount_cents) != self.applies_to:
             return False
         return pattern_matches(self.match_type, self.pattern, description)
 
@@ -115,14 +108,6 @@ def pattern_matches(match_type: str, pattern: str, description: str) -> bool:
     if match_type == CONTAINS:
         return pat.casefold() in desc.casefold()
     raise ValueError(f"unknown match_type {match_type!r}")
-
-
-def rule_allowed(description: str) -> bool:
-    """False for descriptions that are tagged by hand every time (Venmo
-    cashouts, eCheck deposits, internet transfers): the UI should not offer
-    Remember for them, and rules never match them."""
-    folded = normalize_description(description).casefold()
-    return not any(marker in folded for marker in _NO_RULE_MARKERS)
 
 
 def match_type_for(description: str, pattern: str) -> str:
@@ -224,8 +209,7 @@ def create_rule_from_transaction(
     """Remember: rule whose applies_to comes from the source transaction's sign.
 
     ``pattern`` defaults to the full description; ``match_type`` defaults to
-    exact when the pattern is the full description, else contains. Raises
-    ValueError for descriptions where Remember is not offered.
+    exact when the pattern is the full description, else contains.
     The source row itself should already be saved as manual by the caller.
     """
     row = conn.execute(
@@ -233,8 +217,6 @@ def create_rule_from_transaction(
     ).fetchone()
     if row is None:
         raise KeyError(transaction_id)
-    if not rule_allowed(row["description"]):
-        raise ValueError("no rule is offered for this description; tag it by hand")
     if pattern is None:
         pattern = row["description"]
     if match_type is None:
@@ -412,7 +394,6 @@ def preview_match_count(
         1
         for row in conn.execute(sql)
         if sign_of(row["amount_cents"]) == applies_to
-        and rule_allowed(row["description"])
         and pattern_matches(match_type, pattern, row["description"])
     )
 

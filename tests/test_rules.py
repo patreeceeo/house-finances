@@ -259,33 +259,22 @@ def test_delete_rule_without_reapply_keeps_tags(conn):
     assert txn(conn, t)["category_source"] == "rule"
 
 
-# --- remember not offered ----------------------------------------------------
+# --- any description can have a rule ----------------------------------------
 
 
 @pytest.mark.parametrize(
     "desc",
     [
         "VENMO CASHOUT",
-        "Venmo  Cashout 1234",
         "eCheck Deposit",
-        "ECHECK DEPOSIT 55",
-        "Internet transfer from Spending account XXXXXX0000",
         "Internet transfer from Savings account XXXXXX0000",
     ],
 )
-def test_rule_not_allowed(conn, desc):
-    assert not rules.rule_allowed(desc)
+def test_rule_from_any_description(conn, desc):
     t = add_txn(conn, desc, 100)
-    with pytest.raises(ValueError):
-        rules.create_rule_from_transaction(conn, t, person_id=db.get_house_id(conn))
-    # A broad contains rule still never tags these.
-    rules.create_rule(conn, "e", "deposit", match_type="contains", person_id=db.get_house_id(conn))
-    assert txn(conn, t)["category_source"] is None
-
-
-def test_rule_allowed_for_ordinary_descriptions():
-    assert rules.rule_allowed("Zelle payment from SOMEONE")
-    assert rules.rule_allowed("VENMO PAYMENT")
+    other = add_txn(conn, desc, 100)
+    rules.create_rule_from_transaction(conn, t, person_id=db.get_house_id(conn))
+    assert txn(conn, other)["category_source"] == "rule"
 
 
 # --- listing / seed ----------------------------------------------------------

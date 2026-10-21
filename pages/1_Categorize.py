@@ -266,25 +266,21 @@ with st.container(border=True):
             st.caption(f"{purpose_row['name']} has no split and is left out of reports and balances.")
 
     # Remember for this description.
-    remember = False
     pattern = txn["description"]
-    if rules.rule_allowed(txn["description"]):
-        remember = st.checkbox("Remember for this description", value=True, key=f"{k}_remember")
-        if remember:
-            pattern = st.text_input(
-                "Pattern", value=txn["description"], key=f"{k}_pattern",
-                help="The full description makes an exact rule; shorten it to match any "
-                "description containing it (case-insensitive).",
-            )
-            preview = categorize.preview_rule(conn, tid, pattern)
-            noun = "deposits" if is_deposit else "withdrawals"
-            kind_text = "Exact match" if preview.match_type == rules.EXACT else "Contains (case-insensitive)"
-            st.caption(
-                f"{kind_text} · matches {preview.total} existing {noun}; "
-                f"{preview.will_tag} other uncategorized will be tagged on save."
-            )
-    else:
-        st.caption("No rule is offered for this description; it is tagged by hand each time.")
+    remember = st.checkbox("Remember for this description", value=True, key=f"{k}_remember")
+    if remember:
+        pattern = st.text_input(
+            "Pattern", value=txn["description"], key=f"{k}_pattern",
+            help="The full description makes an exact rule; shorten it to match any "
+            "description containing it (case-insensitive).",
+        )
+        preview = categorize.preview_rule(conn, tid, pattern)
+        noun = "deposits" if is_deposit else "withdrawals"
+        kind_text = "Exact match" if preview.match_type == rules.EXACT else "Contains (case-insensitive)"
+        st.caption(
+            f"{kind_text} · matches {preview.total} existing {noun}; "
+            f"{preview.will_tag} other uncategorized will be tagged on save."
+        )
 
     b1, b2, _ = st.columns([1, 1, 4])
     save = b1.button("Save", type="primary", key=f"{k}_save")

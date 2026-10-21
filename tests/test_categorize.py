@@ -184,12 +184,11 @@ def test_transfer_has_no_split(data):
     assert split_of(conn, tx["rent"]) == {}
 
 
-def test_remember_refused_for_venmo(data):
+def test_remember_allowed_for_venmo(data):
     conn, people, tx = data
-    with pytest.raises(ValueError):
-        cat.save_deposit(conn, tx["venmo"], people["Alice"], remember=True)
-    cat.save_deposit(conn, tx["venmo"], people["Alice"])
+    cat.save_deposit(conn, tx["venmo"], people["Alice"], remember=True)
     assert tags(conn, tx["venmo"])["category_source"] == "manual"
+    assert rules.find_best_rule(conn, "VENMO CASHOUT 555", 5000) is not None
 
 
 def test_validation(data):
@@ -314,8 +313,8 @@ def test_page_deposit_new_person_inline(app_db):
     at = run_page()
     select_row(at, tx["venmo"])
     k = f"cat_{tx['venmo']}"
-    # Remember not offered for Venmo cashouts
-    assert not [c for c in at.checkbox if c.key == f"{k}_remember"]
+    # Remember is offered for every description; leave it off here
+    at.checkbox(key=f"{k}_remember").uncheck().run()
     at.selectbox(key=f"{k}_person").set_value(-1).run()
     at.text_input(key=f"{k}_new_person").input("Dana").run()
     at.button(key=f"{k}_save").click().run()
