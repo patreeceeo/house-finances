@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -226,6 +227,43 @@ def test_cli_picker_used(tmp_path, monkeypatch, capsys):
     assert "3 new" in capsys.readouterr().out
     monkeypatch.setattr(cli, "pick_files", lambda: [])
     assert cli.main(["--db", str(tmp_path / "x.db")]) == 0
+
+
+def test_is_wsl(monkeypatch):
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    assert cli.is_wsl()
+
+
+def test_pick_files_uses_windows_dialog_on_wsl(monkeypatch):
+    monkeypatch.setattr(cli, "is_wsl", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "powershell.exe":
+            out = "C:\\Users\\me\\Downloads\\a.csv\r\nC:\\Users\\me\\b b.csv\r\n"
+        else:
+            out = "/mnt/c/" + cmd[-1][3:].replace("\\", "/") + "\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.pick_files() == ["/mnt/c/Users/me/Downloads/a.csv", "/mnt/c/Users/me/b b.csv"]
+    assert [c[:2] for c in calls[1:]] == [["wslpath", "-u"]] * 2
+
+
+def test_pick_files_windows_cancel_and_missing(monkeypatch):
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+    assert cli.pick_files_windows() == []
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError(cmd[0])
+
+    monkeypatch.setattr(cli.subprocess, "run", missing)
+    with pytest.raises(cli.PickerUnavailable):
+        cli.pick_files_windows()
 
 
 @pytest.mark.skipif(not os.environ.get("HOUSEFIN_SAMPLE_CSV"), reason="HOUSEFIN_SAMPLE_CSV not set")

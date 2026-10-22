@@ -1,13 +1,16 @@
 """Import bank CSV exports: python ingest.py [file.csv ...]
 
-With no paths, a file picker opens to choose one or more CSVs (needs a
-display; under WSL that means WSLg). Re-importing the same or overlapping
+With no paths, a file picker opens to choose one or more CSVs: under WSL the
+Windows Open dialog (via powershell.exe), elsewhere tkinter (needs a
+display). Re-importing the same or overlapping
 exports adds nothing new.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,8 +28,59 @@ class PickerUnavailable(RuntimeError):
     pass
 
 
+# Windows Open dialog, one chosen path per output line. The owner form is
+# TopMost so the dialog is not hidden behind the terminal.
+_WINDOWS_PICKER_PS = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.Title = 'Choose bank CSV exports to import'
+$d.Filter = 'CSV files (*.csv)|*.csv|All files (*.*)|*.*'
+$d.Multiselect = $true
+if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { $d.FileNames }
+"""
+
+
+def is_wsl() -> bool:
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+
+
 def pick_files() -> list[str]:
-    """Native multi-file picker. Raises PickerUnavailable without tkinter/display."""
+    """Native multi-file picker: the Windows dialog under WSL, else tkinter.
+    Raises PickerUnavailable when neither can be shown."""
+    if is_wsl():
+        return pick_files_windows()
+    return pick_files_tk()
+
+
+def pick_files_windows() -> list[str]:
+    """Windows Open dialog from WSL; paths come back as WSL paths."""
+    try:
+        out = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-STA", "-Command", _WINDOWS_PICKER_PS],
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        ).stdout
+    except FileNotFoundError:
+        raise PickerUnavailable("powershell.exe is not on PATH") from None
+    except subprocess.CalledProcessError as e:
+        raise PickerUnavailable(f"the Windows file dialog failed: {e.stderr.strip()}") from None
+    windows_paths = [line.strip() for line in out.splitlines() if line.strip()]
+    return [
+        subprocess.run(
+            ["wslpath", "-u", wp], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        for wp in windows_paths
+    ]
+
+
+def pick_files_tk() -> list[str]:
+    """tkinter multi-file picker. Raises PickerUnavailable without tkinter/display."""
     try:
         import tkinter
         from tkinter import filedialog
