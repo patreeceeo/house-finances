@@ -228,6 +228,9 @@ def test_share_totals(conn):
 
 def test_to_percents_sums_to_exactly_100():
     assert splits.to_percents([(1, 3), (2, 1)]) == {1: 75.0, 2: 25.0}
+    # Finite decimals are shown exactly, never rounded to two places.
+    assert splits.to_percents([(1, 12.125), (2, 87.875)]) == {1: 12.125, 2: 87.875}
+    assert splits.to_percents([(1, 1), (2, 7)]) == {1: 12.5, 2: 87.5}
     thirds = splits.to_percents([(1, 1), (2, 1), (3, 1)])
     assert sorted(thirds.values()) == [33.33, 33.33, 33.34]
     assert round(sum(thirds.values()), 2) == 100
@@ -239,6 +242,10 @@ def test_percent_total_error():
     assert splits.percent_total_error([33.33, 33.33, 33.34]) is None
     assert "5% is still unassigned" in splits.percent_total_error([60, 35])
     assert "take off 10%" in splits.percent_total_error([60, 50])
+    # Summed exactly: no rounding to two decimals.
+    assert splits.percent_total_error([12.125, 87.875]) is None
+    assert "0.001% is still unassigned" in splits.percent_total_error([33.333, 33.333, 33.333])
+    assert "take off 0.005%" in splits.percent_total_error([50.005, 50])
 
 
 # --- sync_after_rules -------------------------------------------------------------

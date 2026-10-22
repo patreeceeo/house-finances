@@ -148,8 +148,10 @@ def test_excluded_and_cleared_purpose_reset_source(setup):
     assert source(conn, t2) is None and weights(conn, t2) == {}
 
 
-def test_same_split_compares_percents():
-    assert splits.same_split([(1, 1), (2, 1), (3, 1)], [(1, 33.34), (2, 33.33), (3, 33.33)])
+def test_same_split_compares_exact_proportions():
+    assert splits.same_split([(1, 1), (2, 1)], [(1, 50), (2, 50)])
+    assert not splits.same_split([(1, 1), (2, 1), (3, 1)], [(1, 33.34), (2, 33.33), (3, 33.33)])
+    assert not splits.same_split([(1, 12.125), (2, 87.875)], [(1, 12.13), (2, 87.87)])
     assert splits.same_split([(1, 35), (2, 0)], [(1, 100)])
     assert not splits.same_split([(1, 1), (2, 1)], [(1, 60), (2, 40)])
 
@@ -187,6 +189,19 @@ def test_unedited_editor_weights_save_as_default(setup):
     assert source(conn, t) == "default"
     assert cat.split_origin(conn, cat.get_transaction(conn, t), costco) == "default"
     assert cat.split_origin(conn, cat.get_transaction(conn, t), water) is None
+
+
+def test_entered_percents_saved_exactly(setup):
+    conn, a, b, costco, water = setup
+    t = add_tx(conn, "2026-02-01", -100000)
+    cat.save_withdrawal(conn, t, costco, [(a, 12.125), (b, 87.875)])
+    assert weights(conn, t) == {a: 12.125, b: 87.875}
+    assert {r["person_id"]: r["share_cents"] for r in splits.get_transaction_split(conn, t)} == {
+        a: 12125, b: 87875
+    }
+    # Saved again unchanged, the exact values are kept.
+    cat.save_withdrawal(conn, t, costco, [(a, 12.125), (b, 87.875)])
+    assert weights(conn, t) == {a: 12.125, b: 87.875} and source(conn, t) == "manual"
 
 
 def test_edited_weights_save_as_manual_and_back_to_default(setup):

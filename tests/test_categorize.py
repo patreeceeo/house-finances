@@ -321,6 +321,38 @@ def test_page_withdrawal_with_split_and_remember(app_db):
     assert len(at.selectbox(key="cat_selected").options) == 6
 
 
+def test_page_split_percents_are_exact(app_db):
+    path, people, tx = app_db
+    at = run_page()
+    conn = db.connect(path)
+    rent = db.get_purpose_id(conn, "Rent")
+    A, B, C = people["Alice"], people["Bob"], people["Cara"]
+
+    # An even three-way split is shown rounded but saved as exact thirds.
+    select_row(at, tx["rent_old"])
+    k = f"cat_{tx['rent_old']}"
+    at.selectbox(key=f"{k}_purpose").set_value(rent).run()
+    assert at.number_input(key=f"{k}_w_{rent}_2026-01_{A}").value == 33.34
+    at.checkbox(key=f"{k}_remember").uncheck().run()
+    at.button(key=f"{k}_save").click().run()
+    assert not at.exception, at.exception
+    assert split_of(conn, tx["rent_old"]) == {A: (1.0, 100000), B: (1.0, 100000), C: (1.0, 100000)}
+
+    # Typed percents are stored as typed, and the total check is exact.
+    select_row(at, tx["rent"])
+    k = f"cat_{tx['rent']}"
+    at.selectbox(key=f"{k}_purpose").set_value(rent).run()
+    at.number_input(key=f"{k}_w_{rent}_2026-02_{A}").set_value(12.125).run()
+    at.number_input(key=f"{k}_w_{rent}_2026-02_{B}").set_value(87.874).run()
+    assert any("0.001% is still unassigned" in w.value for w in at.warning)
+    at.number_input(key=f"{k}_w_{rent}_2026-02_{B}").set_value(87.875).run()
+    assert not at.warning
+    at.checkbox(key=f"{k}_remember").uncheck().run()
+    at.button(key=f"{k}_save").click().run()
+    assert not at.exception, at.exception
+    assert split_of(conn, tx["rent"]) == {A: (12.125, 36375), B: (87.875, 263625)}
+
+
 def test_page_deposit_new_person_inline(app_db):
     path, people, tx = app_db
     at = run_page()

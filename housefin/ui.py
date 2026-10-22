@@ -46,6 +46,12 @@ def format_cents(cents: int | None, *, symbol: str = "$") -> str:
     return f"{sign}{symbol}{dollars:,}.{rem:02d}"
 
 
+def format_percent(value: float) -> str:
+    """A percent as entered, every digit kept: 12.125 -> '12.125%', 50.0 -> '50%'."""
+    text = repr(float(value))
+    return (text[:-2] if text.endswith(".0") else text) + "%"
+
+
 def parse_dollars(text: str | float | int) -> int:
     """'$1,234.56' / '-12.5' / 12.5 -> integer cents (rounded half away from zero).
 

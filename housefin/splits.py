@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Sequence
+from decimal import Decimal, localcontext
 from fractions import Fraction
 
 from housefin import db
@@ -89,30 +90,62 @@ def compute_shares(amount_cents: int, weights: Weights) -> list[tuple[int, int]]
     return [(pid, sign * s) for pid, s in zip(ids, shares)]
 
 
+def _terminates(f: Fraction) -> bool:
+    """Whether ``f`` is a finite decimal (denominator has no factor but 2 and 5)."""
+    d = f.denominator
+    for p in (2, 5):
+        while d % p == 0:
+            d //= p
+    return d == 1
+
+
 def to_percents(weights: Weights) -> dict[int, float]:
-    """``{person_id: percent}`` for the positive weights, to two decimals and
-    summing to exactly 100 (rounding leftover goes as in :func:`compute_shares`).
-    Split editors show these; the percents are then saved as the weights."""
-    positive = [(pid, w) for pid, w in weights if w > 0]
+    """``{person_id: percent}`` for the positive weights, for split editors.
+
+    Exact whenever every percent is a finite decimal (weights saved from an
+    editor always are). Otherwise (e.g. an even 1/1/1 split) the percents are
+    only a display: two decimals summing to exactly 100 (leftover as in
+    :func:`compute_shares`), and editors save the stored weights, not these,
+    when nothing was edited.
+    """
+    positive = [(pid, _exact(w)) for pid, w in weights if w > 0]
     if not positive:
         return {}
+    total = sum(w for _, w in positive)
+    exact = [(pid, 100 * w / total) for pid, w in positive]
+    if all(_terminates(p) for _, p in exact):
+        return {pid: float(p) for pid, p in exact}
     return {pid: hundredths / 100 for pid, hundredths in compute_shares(10000, positive)}
 
 
+def _fmt(f: Fraction) -> str:
+    """A sum of entered decimals, written out in full (``5``, ``0.001``)."""
+    with localcontext() as ctx:
+        ctx.prec = 50
+        d = Decimal(f.numerator) / Decimal(f.denominator)
+    text = format(d, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def percent_total_error(percents: Iterable[float]) -> str | None:
-    """Why a split editor's percents can't be saved, or None when they total 100%."""
-    total = round(sum(percents), 2)
+    """Why a split editor's percents can't be saved, or None when they total
+    exactly 100% (summed as the decimals entered, no rounding)."""
+    total = sum((_exact(p) for p in percents), Fraction(0))
     if total == 100:
         return None
     if total > 100:
-        return f"Percents total {total:g}%; take off {round(total - 100, 2):g}%."
-    return f"Percents total {total:g}%; {round(100 - total, 2):g}% is still unassigned."
+        return f"Percents total {_fmt(total)}%; take off {_fmt(total - 100)}%."
+    return f"Percents total {_fmt(total)}%; {_fmt(100 - total)}% is still unassigned."
 
 
 def same_split(a: Weights, b: Weights) -> bool:
-    """Whether two weight lists divide an amount the same way (compared as the
-    percents a split editor shows, so 1/1/1 equals 33.34/33.33/33.33)."""
-    return to_percents(_clean(a)) == to_percents(_clean(b))
+    """Whether two weight lists divide an amount in exactly the same
+    proportions (1/1 equals 50/50; 1/1/1 does not equal 33.34/33.33/33.33)."""
+    def ratios(w: Weights) -> dict[int, Fraction]:
+        w = [(pid, _exact(x)) for pid, x in _clean(w)]
+        total = sum(x for _, x in w)
+        return {pid: x / total for pid, x in w}
+    return ratios(a) == ratios(b)
 
 
 def transaction_month(row: sqlite3.Row | dict) -> str:

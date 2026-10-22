@@ -227,8 +227,13 @@ with st.container(border=True):
                 )
                 weights.append((p["id"], percent))
             weights = [(pid, w) for pid, w in weights if w > 0]
+            edited = dict(weights) != init_map
+            if not edited:
+                # The editor may show rounded percents (an even 1/1/1 split
+                # shows 33.34/33.33/33.33); unedited, save the exact weights.
+                weights = list(init)
             if weights:
-                split_error = splits.percent_total_error(w for _, w in weights)
+                split_error = splits.percent_total_error(w for _, w in weights) if edited else None
                 if split_error:
                     st.warning(split_error)
                 else:
@@ -237,7 +242,7 @@ with st.container(border=True):
                         [
                             {
                                 "Person": next(p["name"] for p in cand if p["id"] == pid),
-                                "%": f"{w:g}%",
+                                "%": ui.format_percent(splits.to_percents(weights)[pid]),
                                 "Share": ui.format_cents(shares[pid]),
                             }
                             for pid, w in weights
@@ -246,7 +251,6 @@ with st.container(border=True):
                     )
             else:
                 st.warning("Nobody is in the split; save would leave it unsplit.")
-            edited = dict(weights) != init_map
             # Mirror categorize._save_split: unedited keeps the stored split's
             # source (or is the purpose default); edited is 'manual' unless it
             # matches the default again.

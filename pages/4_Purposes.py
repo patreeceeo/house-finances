@@ -50,6 +50,11 @@ def _bump(pid: int) -> None:
 
 def _save_split(pid: int, name: str, person_ids: list[int], ver: int) -> None:
     weights = {p: float(ss.get(f"purpose_w_{pid}_{ver}_{p}") or 0) for p in person_ids}
+    shown = splits.to_percents(splits.get_purpose_split(conn, pid))
+    if all(weights[p] == shown.get(p, 0.0) for p in person_ids):
+        # Unchanged: the stored weights are exact; what is shown may be rounded.
+        _flash("info", f"No changes to the default split for {name}.")
+        return
     if _run(
         lambda: purposes.save_default_split(conn, pid, weights),
         f"Saved the default split for {name}; it applies to future withdrawals.",
@@ -83,9 +88,10 @@ even_names = ", ".join(p["name"] for p in even) or "nobody (no active housemates
 def _summary(stored: list[tuple[int, float]]) -> str:
     if not stored:
         return "even split among active housemates"
-    pct = purposes.percentages(dict(stored))
+    pct = splits.to_percents(stored)
     return ", ".join(
-        f"{people[pid]['name'] if pid in people else pid} {pct[pid]:.0f}%" for pid, _ in stored
+        f"{people[pid]['name'] if pid in people else pid} {ui.format_percent(pct[pid])}"
+        for pid, _ in stored
     )
 
 

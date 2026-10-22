@@ -226,6 +226,30 @@ def test_page_add_rename_and_split(app_db):
     c.close()
 
 
+def test_page_split_percents_are_exact(app_db):
+    c = db.connect(app_db)
+    rent, water = db.get_purpose_id(c, "Rent"), db.get_purpose_id(c, "Water")
+    alice = db.get_person_by_name(c, "Alice")["id"]
+    bob = db.get_person_by_name(c, "Bob")["id"]
+    house = db.get_house_id(c)
+    splits.set_purpose_split(c, water, [(alice, 1), (bob, 1), (house, 1)])
+    at = _app()
+
+    at.number_input(key=f"purpose_w_{rent}_0_{alice}").set_value(12.125)
+    at.number_input(key=f"purpose_w_{rent}_0_{bob}").set_value(87.875)
+    at.run()
+    assert not at.warning
+    at.button(key=f"purpose_save_{rent}").click().run()
+    assert sorted(splits.get_purpose_split(c, rent)) == sorted([(alice, 12.125), (bob, 87.875)])
+    assert any(e.label == "**Rent** — default: Alice 12.125%, Bob 87.875%" for e in at.expander)
+
+    # Thirds are shown rounded; saving them unchanged keeps the exact 1/1/1.
+    at.button(key=f"purpose_save_{water}").click().run()
+    assert not at.exception
+    assert sorted(splits.get_purpose_split(c, water)) == sorted([(alice, 1.0), (bob, 1.0), (house, 1.0)])
+    c.close()
+
+
 def test_page_refuses_duplicate_and_disables_delete_when_used(app_db):
     c = db.connect(app_db)
     rent = db.get_purpose_id(c, "Rent")
