@@ -27,8 +27,12 @@ if flash := ss.pop("_cat_flash", None):
 
 # --- filters -----------------------------------------------------------------
 
-f1, f2, f3 = st.columns([1, 1.3, 2])
-status = f1.radio("Show", ["Uncategorized", "All"], horizontal=True, key="cat_status")
+f1, f2, f3 = st.columns([1.6, 1.3, 2])
+status = f1.radio(
+    "Show", ["Uncategorized", "Needs review", "All"], horizontal=True, key="cat_status",
+    help="Needs review: a default split left out someone who wasn't active that month, "
+    "so everyone else's share was scaled up. Save the split to confirm it, or change it.",
+)
 kind = f2.radio("Type", ["All", "Deposits", "Withdrawals"], horizontal=True, key="cat_kind")
 search = f3.text_input(
     "Search", key="cat_search", placeholder="Description, person or purpose"
@@ -36,7 +40,9 @@ search = f3.text_input(
 
 rows = categorize.list_transactions(
     conn,
-    status=categorize.UNCATEGORIZED if status == "Uncategorized" else categorize.ALL,
+    status={"Uncategorized": categorize.UNCATEGORIZED, "Needs review": categorize.REVIEW}.get(
+        status, categorize.ALL
+    ),
     kind={"All": categorize.ALL, "Deposits": categorize.DEPOSITS}.get(kind, categorize.WITHDRAWALS),
     months=months,
     search=search,
@@ -44,7 +50,8 @@ rows = categorize.list_transactions(
 st.caption(f"{len(rows)} transaction(s) · {ui.describe_months(months)}")
 if not rows:
     st.info(
-        "Nothing left to categorize here." if status == "Uncategorized" else "No transactions match."
+        {"Uncategorized": "Nothing left to categorize here.",
+         "Needs review": "No splits are waiting for review here."}.get(status, "No transactions match.")
     )
     st.stop()
 
@@ -88,6 +95,7 @@ st.dataframe(
             "Person / purpose": tag_label(r),
             "Source": r["category_source"] or "",
             "Applies to": r["applies_month"] or "",
+            "Review": "Needs review" if r["needs_review"] else "",
         }
         for r in rows
     ],
@@ -217,6 +225,19 @@ with st.container(border=True):
             fake = {**dict(txn), "applies_month": applies or None}
             init = categorize.initial_weights(conn, fake, None if purpose_id == NEW else purpose_id)
             init_map = splits.to_percents(init)
+            left_out = categorize.left_out_for_editor(
+                conn, fake, None if purpose_id == NEW else purpose_id
+            )
+            if left_out:
+                who = ", ".join(f"{n} ({ui.format_percent(p)})" for n, p in left_out)
+                one = len(left_out) == 1
+                st.warning(
+                    f"Needs review: {who} {'is' if one else 'are'} in the {purpose_label} default "
+                    f"split but not active in {ui.format_month(month)}. "
+                    f"{'Their share was' if one else 'Their shares were'} left out, so everyone "
+                    "else's percent below is scaled up to cover the whole amount. Saving confirms "
+                    "the split as shown; change the percents first if that isn't right."
+                )
             st.markdown("**Split** (percent per person; set 0 to leave someone out)")
             cand = categorize.split_candidates(conn, month, init)
             for p in cand:
@@ -237,7 +258,7 @@ with st.container(border=True):
                 if split_error:
                     st.warning(split_error)
                 else:
-                    shares = dict(splits.compute_shares(-amount, weights))
+                    shares = dict(splits.compute_shares(-amount, weights, rotate=tid))
                     st.dataframe(
                         [
                             {
@@ -303,7 +324,7 @@ def _after_change(message: str) -> None:
     """Flash a message, move selection on if the row left the list, rerun."""
     pos = ids.index(tid)
     ss["_cat_next"] = ids[pos + 1] if pos + 1 < len(ids) else (ids[pos - 1] if pos else None)
-    if status != "Uncategorized":
+    if status == "All":
         ss["_cat_next"] = tid
     ss["_cat_flash"] = message
     ss["_cat_table_ver"] = ss.get("_cat_table_ver", 0) + 1

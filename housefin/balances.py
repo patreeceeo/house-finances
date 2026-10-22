@@ -219,3 +219,20 @@ def uncategorized_withdrawals(
         params,
     ).fetchone()
     return row[0], row[1]
+
+
+def splits_pending_review(
+    conn: sqlite3.Connection, months: Iterable[str] | None = None
+) -> tuple[int, int]:
+    """``(count, total_cents)`` of transactions in the months whose default
+    split left someone out (not active that month), so everyone else's share
+    was scaled up and a person has not confirmed it yet. The total is in bank
+    sign."""
+    clause, params = _month_clause(_norm(months), None)
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(t.amount_cents), 0) FROM transactions t"
+        " WHERE EXISTS (SELECT 1 FROM split_left_out l WHERE l.transaction_id = t.id)"
+        + clause,
+        params,
+    ).fetchone()
+    return row[0], row[1]

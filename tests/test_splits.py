@@ -48,25 +48,43 @@ def test_rent_example():
     ]
 
 
-def test_leftover_cent_goes_to_largest_weight():
-    # 100 cents at 1:1:1:1:1:2 -> 14.29 x5 and 28.57; rounded they sum to 99,
-    # so the leftover cent goes to the weight-2 person.
+def test_leftover_cents_go_to_largest_remainders():
+    # 100 cents at 1:1:1:1:1:2 -> 14.29 x5 and 28.57; floored they sum to 98.
+    # The weight-2 person was rounded down most (.57) and gets one cent; the
+    # other goes to the first of the tied .29s.
     ws = [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 2)]
-    assert compute_shares(100, ws) == [(1, 14), (2, 14), (3, 14), (4, 14), (5, 14), (6, 30)]
+    assert compute_shares(100, ws) == [(1, 15), (2, 14), (3, 14), (4, 14), (5, 14), (6, 29)]
 
 
-def test_tie_for_largest_weight_goes_to_lowest_person_id():
-    assert compute_shares(100, [(7, 1), (3, 1), (5, 1)]) == [(7, 33), (3, 34), (5, 33)]
+def test_nobody_gets_more_than_one_extra_cent():
+    # $33.89 over 12 equal people: 282.42 each, 5 cents left over.
+    shares = [s for _, s in compute_shares(3389, [(i, 1) for i in range(1, 13)])]
+    assert sorted(shares) == [282] * 7 + [283] * 5
 
 
-def test_negative_leftover_taken_from_largest():
-    # 2 cents over 3 equal people: each rounds to 1, so the largest gives one back.
-    assert compute_shares(2, [(1, 1), (2, 1), (3, 1)]) == [(1, 0), (2, 1), (3, 1)]
+def test_ties_rotate_with_the_transaction():
+    ws = [(7, 1), (3, 1), (5, 1)]
+    # People in id order 3, 5, 7; the rotation picks who is first in line.
+    assert compute_shares(100, ws) == [(7, 33), (3, 34), (5, 33)]
+    assert compute_shares(100, ws, rotate=1) == [(7, 33), (3, 33), (5, 34)]
+    assert compute_shares(100, ws, rotate=2) == [(7, 34), (3, 33), (5, 33)]
+    assert compute_shares(100, ws, rotate=3) == compute_shares(100, ws)
+    # Over three transactions everyone pays the extra cent once.
+    totals = {pid: 0 for pid, _ in ws}
+    for t in range(3):
+        for pid, s in compute_shares(100, ws, rotate=t):
+            totals[pid] += s
+    assert totals == {7: 100, 3: 100, 5: 100}
+
+
+def test_small_amount_over_more_people():
+    # 2 cents over 3 equal people: two of them pay a cent.
+    assert compute_shares(2, [(1, 1), (2, 1), (3, 1)]) == [(1, 1), (2, 1), (3, 0)]
 
 
 def test_sign_follows_amount_and_sums_exactly():
     shares = compute_shares(-1001, [(1, 1), (2, 1), (3, 1)])
-    assert shares == [(1, -333), (2, -334), (3, -334)]
+    assert shares == [(1, -334), (2, -334), (3, -333)]
     for amount in (1, 7, 99, 12345, -12345, 0):
         for ws in ([(1, 3), (2, 7)], [(1, 0.1), (2, 0.2), (3, 0.3)], [(1, 1)]):
             assert sum(s for _, s in compute_shares(amount, ws)) == amount

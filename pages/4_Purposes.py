@@ -151,8 +151,8 @@ for p in purposes.list_with_usage(conn):
         hidden = [i for i, _ in stored if i not in values]
         if hidden:
             st.caption(
-                "Also in the stored default but not currently active (kept, dropped in months "
-                "they are inactive): " + ", ".join(people[i]["name"] for i in hidden if i in people)
+                "Also in the stored default but not currently active (kept; left out of "
+                "transactions in months they are inactive, which are then flagged for review): " + ", ".join(people[i]["name"] for i in hidden if i in people)
             )
         ids = [c["id"] for c in candidates]
         b1, b2, _ = st.columns([1, 1, 3])

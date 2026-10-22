@@ -27,6 +27,13 @@ Where a split came from is kept in ``transactions.split_source``:
 writes or removes split rows keeps it in step; other modules remove a split
 with :func:`clear_split`. Rows saved before the column existed with split rows
 but no source (only possible from raw SQL) are treated as manual.
+
+A purpose default can name people who are not active in a transaction's
+month. They are left out of that transaction's default split, which scales
+everyone else's share up to cover the whole amount. That is the app's guess,
+not a person's decision, so who was left out (and with what weight) is kept
+in ``split_left_out`` and the split is *pending review* until someone
+confirms it (:func:`confirm_split`) or saves a split in an editor.
 """
 
 from __future__ import annotations
@@ -55,14 +62,19 @@ def _exact(weight: float | int) -> Fraction:
     return Fraction(weight) if isinstance(weight, int) else Fraction(str(weight))
 
 
-def compute_shares(amount_cents: int, weights: Weights) -> list[tuple[int, int]]:
+def compute_shares(
+    amount_cents: int, weights: Weights, *, rotate: int = 0
+) -> list[tuple[int, int]]:
     """Split ``amount_cents`` across ``(person_id, weight)`` pairs.
 
-    Each share is amount x weight / total weight, rounded half away from zero
-    to the cent. Whatever the rounding leaves over (positive or negative) goes
-    to the largest weight; ties go to the lowest person_id. Shares carry the
-    sign of ``amount_cents`` and always sum exactly to it. Returns
-    ``[(person_id, share_cents)]`` in input order.
+    Each person's exact share is amount x weight / total weight. Everyone gets
+    that rounded down to the cent; the cents left over go out one each to the
+    people whose share was rounded down the most, so nobody gets more than one
+    extra cent. Ties (e.g. an even split) are broken by a rotation: people in
+    person_id order, starting ``rotate`` places in, so callers pass the
+    transaction id and the extra cents move around from one transaction to the
+    next. Shares carry the sign of ``amount_cents`` and always sum exactly to
+    it. Returns ``[(person_id, share_cents)]`` in input order.
 
     This function is sign-agnostic; callers storing splits pass
     ``-transaction.amount_cents`` (see the module docstring).
@@ -79,14 +91,15 @@ def compute_shares(amount_cents: int, weights: Weights) -> list[tuple[int, int]]
     sign = -1 if amount_cents < 0 else 1
     magnitude = abs(amount_cents)
     total = sum(exact)
-    shares = []
-    for w in exact:
-        raw = magnitude * w / total
-        shares.append(int(raw + Fraction(1, 2)))  # half-up on a non-negative value
-    leftover = magnitude - sum(shares)
-    if leftover:
-        largest = min(range(len(weights)), key=lambda i: (-exact[i], ids[i]))
-        shares[largest] += leftover
+    raw = [magnitude * w / total for w in exact]
+    shares = [int(r) for r in raw]  # floor: raw is non-negative
+    leftover = magnitude - sum(shares)  # 0 <= leftover < len(weights)
+    by_id = sorted(range(len(ids)), key=lambda i: ids[i])
+    start = rotate % len(ids)
+    turn = {i: (pos - start) % len(ids) for pos, i in enumerate(by_id)}
+    order = sorted(range(len(ids)), key=lambda i: (-(raw[i] - shares[i]), turn[i]))
+    for i in order[:leftover]:
+        shares[i] += 1
     return [(pid, sign * s) for pid, s in zip(ids, shares)]
 
 
@@ -105,7 +118,7 @@ def to_percents(weights: Weights) -> dict[int, float]:
     Exact whenever every percent is a finite decimal (weights saved from an
     editor always are). Otherwise (e.g. an even 1/1/1 split) the percents are
     only a display: two decimals summing to exactly 100 (leftover as in
-    :func:`compute_shares`), and editors save the stored weights, not these,
+    :func:`compute_shares`, no rotation), and editors save the stored weights, not these,
     when nothing was edited.
     """
     positive = [(pid, _exact(w)) for pid, w in weights if w > 0]
@@ -193,29 +206,43 @@ def _is_excluded(conn: sqlite3.Connection, purpose_id: int) -> bool:
     return row is not None and bool(row["excluded"])
 
 
+def default_split_detail(
+    conn: sqlite3.Connection, purpose_id: int, month: str
+) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    """``(weights, left_out)``: the split a new transaction with this purpose
+    in ``month`` starts from, and the members of the purpose default who are
+    not in it because they are not active that month (with their weights).
+
+    * Excluded purposes (Transfer) -> ``([], [])`` (no split).
+    * The purpose's remembered default, minus anyone not active in ``month``
+      (others keep their weights; the House is always active). A non-empty
+      ``left_out`` means the others' shares are scaled up to cover the whole
+      amount, which needs a person to confirm it.
+    * If there is no default, or nobody in it is active: an even split
+      (weight 1 each) among people active that month, House excluded.
+    * ``[]`` weights if nobody is active at all.
+    """
+    if _is_excluded(conn, purpose_id):
+        return [], []
+    people = {p["id"]: p for p in db.list_people(conn)}
+    default, left_out = [], []
+    for pid, w in get_purpose_split(conn, purpose_id):
+        if pid not in people:
+            continue
+        if people[pid]["is_house"] or db.is_active(people[pid], month):
+            default.append((pid, w))
+        else:
+            left_out.append((pid, w))
+    if default:
+        return default, left_out
+    return [(p["id"], 1.0) for p in db.active_people(conn, month)], left_out
+
+
 def default_split_for(
     conn: sqlite3.Connection, purpose_id: int, month: str
 ) -> list[tuple[int, float]]:
-    """The split a new transaction with this purpose in ``month`` starts from.
-
-    * Excluded purposes (Transfer) -> ``[]`` (no split).
-    * The purpose's remembered default, minus anyone not active in ``month``
-      (others keep their weights; the House is always active).
-    * If there is no default, or nobody in it is active: an even split
-      (weight 1 each) among people active that month, House excluded.
-    * ``[]`` if nobody is active at all.
-    """
-    if _is_excluded(conn, purpose_id):
-        return []
-    people = {p["id"]: p for p in db.list_people(conn)}
-    default = [
-        (pid, w)
-        for pid, w in get_purpose_split(conn, purpose_id)
-        if pid in people and (people[pid]["is_house"] or db.is_active(people[pid], month))
-    ]
-    if default:
-        return default
-    return [(p["id"], 1.0) for p in db.active_people(conn, month)]
+    """The weights of :func:`default_split_detail`."""
+    return default_split_detail(conn, purpose_id, month)[0]
 
 
 # --- transaction splits ---------------------------------------------------------
@@ -248,27 +275,57 @@ def get_split_source(conn: sqlite3.Connection, txn_id: int) -> str | None:
 
 
 def clear_split(conn: sqlite3.Connection, txn_id: int) -> None:
-    """Remove a transaction's split and its source. No transaction of its own:
-    callers already inside one (``db.transaction``) use it as a single step."""
+    """Remove a transaction's split, its source and any pending review. No
+    transaction of its own: callers already inside one (``db.transaction``)
+    use it as a single step."""
     conn.execute("DELETE FROM splits WHERE transaction_id = ?", (txn_id,))
+    conn.execute("DELETE FROM split_left_out WHERE transaction_id = ?", (txn_id,))
     conn.execute("UPDATE transactions SET split_source = NULL WHERE id = ?", (txn_id,))
 
 
+def get_left_out(conn: sqlite3.Connection, txn_id: int) -> list[sqlite3.Row]:
+    """Rows (person_id, name, weight) of the people a default split left out
+    (see the module docstring); empty unless the split is pending review."""
+    return conn.execute(
+        "SELECT l.person_id, p.name, l.weight FROM split_left_out l"
+        " JOIN people p ON p.id = l.person_id"
+        " WHERE l.transaction_id = ? ORDER BY l.weight DESC, p.name",
+        (txn_id,),
+    ).fetchall()
+
+
+def confirm_split(conn: sqlite3.Connection, txn_id: int) -> None:
+    """A person accepts the transaction's split as it is: no longer pending
+    review. The split itself is not changed."""
+    _get_txn(conn, txn_id)
+    with db.transaction(conn):
+        conn.execute("DELETE FROM split_left_out WHERE transaction_id = ?", (txn_id,))
+
+
 def _write_split(
-    conn: sqlite3.Connection, txn: sqlite3.Row, weights: Weights, source: str
+    conn: sqlite3.Connection,
+    txn: sqlite3.Row,
+    weights: Weights,
+    source: str,
+    left_out: Weights = (),
 ) -> None:
     """Replace the split rows and record ``source`` (no commit). Empty weights
-    -> no split (source NULL)."""
+    -> no split (source NULL). ``left_out`` (default splits only) records who
+    the default left out, which puts the split up for review."""
     if source not in (DEFAULT, MANUAL):
         raise ValueError(f"unknown split source {source!r}")
     clear_split(conn, txn["id"])
     if not weights:
         return
     conn.execute("UPDATE transactions SET split_source = ? WHERE id = ?", (source, txn["id"]))
-    shares = dict(compute_shares(-txn["amount_cents"], weights))
+    shares = dict(compute_shares(-txn["amount_cents"], weights, rotate=txn["id"]))
     conn.executemany(
         "INSERT INTO splits (transaction_id, person_id, weight, share_cents) VALUES (?, ?, ?, ?)",
         [(txn["id"], pid, w, shares[pid]) for pid, w in weights],
+    )
+    conn.executemany(
+        "INSERT INTO split_left_out (transaction_id, person_id, weight) VALUES (?, ?, ?)",
+        [(txn["id"], pid, w) for pid, w in left_out],
     )
 
 
@@ -307,7 +364,8 @@ def apply_default_split(
     split set by hand (source 'manual', or split rows with no source) is kept
     unless ``replace=True`` (use that when the purpose itself changed: the old
     split belongs to the old purpose and is stale). Anything else (no split,
-    or a split that came from a default) gets the purpose's current default.
+    or a split that came from a default) gets the purpose's current default,
+    pending review if the default left anyone out (see the module docstring).
 
     Not for re-applying an edited purpose default to past transactions:
     changing a default never changes existing splits, so don't pass ids whose
@@ -324,8 +382,10 @@ def apply_default_split(
                 continue
             if not replace and _is_manual(conn, txn):
                 continue
-            weights = default_split_for(conn, txn["purpose_id"], transaction_month(txn))
-            _write_split(conn, txn, weights, DEFAULT)
+            weights, left_out = default_split_detail(
+                conn, txn["purpose_id"], transaction_month(txn)
+            )
+            _write_split(conn, txn, weights, DEFAULT, left_out)
             if weights:
                 written += 1
     return written

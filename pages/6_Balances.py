@@ -29,6 +29,15 @@ if count:
         "no one's share yet. Categorize them on the Categorize page."
     )
 
+count, total = balances.splits_pending_review(conn, months)
+if count:
+    st.warning(
+        f"{count} split{'s' if count != 1 else ''} totalling {ui.format_cents(-total)} in the "
+        "selected months left out someone who wasn't active that month, so everyone else's "
+        "share was scaled up. Nobody has confirmed "
+        f"{'them' if count != 1 else 'it'} yet: review on the Categorize page (Show: Needs review)."
+    )
+
 rows = balances.balances(conn, months)
 if not rows:
     st.info("No one to show for the selected months.")

@@ -12,6 +12,9 @@ overwrite it. A save can also:
   default split (``apply_default_split(replace=True)``): they were
   uncategorized, so any split rows they had are stale, never a manual split.
 
+Saving a split from an editor is a person's decision, so it also confirms a
+split that was pending review (default split that left someone out).
+
 Each save is one transaction (``db.transaction``): if any step fails, nothing
 from it is kept. Order inside a save matters and is: tag the row -> write its split (and the
 remembered default) -> create the rule -> default splits for rows the rule
@@ -35,9 +38,12 @@ from housefin.parsers.base import normalize_description
 from housefin.splits import Weights
 
 UNCATEGORIZED = "uncategorized"
+REVIEW = "review"
 ALL = "all"
 DEPOSITS = "deposits"
 WITHDRAWALS = "withdrawals"
+
+_NEEDS_REVIEW = "EXISTS (SELECT 1 FROM split_left_out l WHERE l.transaction_id = t.id)"
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -70,17 +76,21 @@ def list_transactions(
 ) -> list[sqlite3.Row]:
     """Transactions newest first, with person/purpose names joined in.
 
-    ``status``: 'uncategorized' (no person and no purpose) or 'all'.
+    ``status``: 'uncategorized' (no person and no purpose), 'review' (split
+    pending review: its default left someone out) or 'all'.
     ``kind``: 'all', 'deposits' (amount > 0) or 'withdrawals' (amount <= 0).
     ``months``: effective months (applies_month, else the date's month); None = all.
     ``search``: case-insensitive substring of the description, person or purpose name.
 
-    Extra columns: person_name, purpose_name, purpose_excluded, month.
+    Extra columns: person_name, purpose_name, purpose_excluded, month,
+    needs_review (0/1).
     """
     where = ["1"]
     params: list = []
     if status == UNCATEGORIZED:
         where.append("t.person_id IS NULL AND t.purpose_id IS NULL")
+    elif status == REVIEW:
+        where.append(_NEEDS_REVIEW)
     elif status != ALL:
         raise ValueError(f"unknown status {status!r}")
     if kind == DEPOSITS:
@@ -102,7 +112,8 @@ def list_transactions(
         params += [like, like, like]
     sql = (
         "SELECT t.*, p.name AS person_name, pu.name AS purpose_name,"
-        f" COALESCE(pu.excluded, 0) AS purpose_excluded, {splits.TXN_MONTH_SQL} AS month"
+        f" COALESCE(pu.excluded, 0) AS purpose_excluded, {splits.TXN_MONTH_SQL} AS month,"
+        f" {_NEEDS_REVIEW} AS needs_review"
         " FROM transactions t"
         " LEFT JOIN people p ON p.id = t.person_id"
         " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
@@ -223,10 +234,11 @@ def _save_split(conn, before, purpose_id, weights, remember_split) -> None:
     """Store editor ``weights`` for a row being tagged with ``purpose_id``.
 
     Split editors always send their weights, edited or not, so the source is
-    worked out from what they match (compared as percents):
+    worked out from what they match (compared as exact proportions):
 
     * the row keeps its purpose and the weights equal its stored split ->
-      left exactly as it is (same rows, same source);
+      left exactly as it is (same rows, same source), and confirmed if it was
+      pending review;
     * the weights equal the purpose's default for the row's month -> stored
       with source 'default';
     * anything else -> 'manual' (set by hand).
@@ -239,6 +251,7 @@ def _save_split(conn, before, purpose_id, weights, remember_split) -> None:
             (r["person_id"], r["weight"]) for r in splits.get_transaction_split(conn, txn_id)
         ]
         if stored and splits.same_split(stored, weights):
+            splits.confirm_split(conn, txn_id)
             if remember_split:
                 splits.set_purpose_split(conn, purpose_id, weights)
             return
@@ -386,3 +399,26 @@ def initial_weights(
     if purpose_id is None:
         return [(p["id"], 1.0) for p in db.active_people(conn, month)]
     return splits.default_split_for(conn, purpose_id, month)
+
+
+def left_out_for_editor(
+    conn: sqlite3.Connection, txn: sqlite3.Row | dict, purpose_id: int | None
+) -> list[tuple[str, float]]:
+    """``[(name, percent)]`` of the people the split editor's starting weights
+    (:func:`initial_weights`) leave out of the purpose default because they
+    are not active in the row's month; percent is their share of the default.
+    For a stored split that is the record kept when it was written (empty once
+    confirmed); otherwise it is worked out from the purpose's current default.
+    """
+    if purpose_id is None:
+        return []
+    if split_origin(conn, txn, purpose_id) is not None:
+        kept = [(r["person_id"], r["weight"]) for r in splits.get_transaction_split(conn, txn["id"])]
+        left = [(r["person_id"], r["weight"]) for r in splits.get_left_out(conn, txn["id"])]
+    else:
+        kept, left = splits.default_split_detail(conn, purpose_id, splits.transaction_month(txn))
+    if not left:
+        return []
+    names = {p["id"]: p["name"] for p in db.list_people(conn)}
+    percents = splits.to_percents(list(kept) + list(left))
+    return [(names.get(pid, str(pid)), percents[pid]) for pid, _ in left]

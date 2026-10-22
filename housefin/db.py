@@ -127,7 +127,35 @@ UPDATE transactions
  WHERE id IN (SELECT transaction_id FROM splits);
 """
 
-MIGRATIONS: list[str] = [_SCHEMA_V1, _SEED_INTEREST_RULE_V2, _SPLIT_SOURCE_V3]
+# v4: people a default split left out because they were not active in the
+# transaction's month (housefin.splits.default_split_detail), with the weight
+# they had in the purpose default. While a transaction has rows here its
+# split is pending review: the others' shares were scaled up to cover the
+# whole amount, and a person must confirm or change that. Backfill: default
+# splits missing an inactive member of their purpose's current default.
+_SPLIT_LEFT_OUT_V4 = """
+CREATE TABLE IF NOT EXISTS split_left_out (
+    transaction_id  INTEGER NOT NULL REFERENCES transactions (id) ON DELETE CASCADE,
+    person_id       INTEGER NOT NULL REFERENCES people (id),
+    weight          REAL    NOT NULL CHECK (weight > 0),
+    PRIMARY KEY (transaction_id, person_id)
+);
+INSERT INTO split_left_out (transaction_id, person_id, weight)
+SELECT t.id, ps.person_id, ps.weight
+  FROM transactions t
+  JOIN purpose_splits ps ON ps.purpose_id = t.purpose_id
+  JOIN people p ON p.id = ps.person_id
+ WHERE t.split_source = 'default'
+   AND p.is_house = 0
+   AND (p.active_from > COALESCE(t.applies_month, substr(t.date, 1, 7))
+        OR p.active_until < COALESCE(t.applies_month, substr(t.date, 1, 7)))
+   AND NOT EXISTS (SELECT 1 FROM splits s
+                    WHERE s.transaction_id = t.id AND s.person_id = ps.person_id);
+"""
+
+MIGRATIONS: list[str] = [
+    _SCHEMA_V1, _SEED_INTEREST_RULE_V2, _SPLIT_SOURCE_V3, _SPLIT_LEFT_OUT_V4,
+]
 
 
 def connect(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
