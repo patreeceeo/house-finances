@@ -17,9 +17,11 @@ from it is kept. Order inside a save matters and is: tag the row -> write its sp
 remembered default) -> create the rule -> default splits for rows the rule
 tagged. So rows tagged by a new rule start from the split just remembered.
 
-Deposits carry a person (``save_deposit``) or, as refunds, a purpose and a
-split (``save_refund``); withdrawals carry a purpose and a split
-(``save_withdrawal``). Excluded purposes (Transfer) never get a split.
+Any transaction can carry a person (``save_person``): a deposit they sent,
+or a withdrawal paid to them, which counts against their balance. Otherwise
+deposits are refunds with a purpose and a split (``save_refund``) and
+withdrawals carry a purpose and a split (``save_withdrawal``). Excluded
+purposes (Transfer) never get a split.
 """
 
 from __future__ import annotations
@@ -248,7 +250,7 @@ def _save_split(conn, before, purpose_id, weights, remember_split) -> None:
     )
 
 
-def save_deposit(
+def save_person(
     conn: sqlite3.Connection,
     txn_id: int,
     person_id: int,
@@ -257,14 +259,16 @@ def save_deposit(
     pattern: str | None = None,
     applies_month=KEEP,
 ) -> SaveResult:
-    """Tag a deposit to the person who sent it (manual); removes any split.
+    """Tag a transaction to a person (manual); removes any split.
+
+    A deposit is money they paid in; a withdrawal is money paid to them, so it
+    reduces what they have paid in.
 
     ``remember``: also create a rule from ``pattern`` (default: the full
-    description) and apply it to other uncategorized matching deposits.
+    description) and apply it to other uncategorized matching rows of the
+    same sign.
     """
-    txn = get_transaction(conn, txn_id)
-    if txn["amount_cents"] <= 0:
-        raise ValueError("only deposits are tagged to a person")
+    get_transaction(conn, txn_id)
     if conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
         raise ValueError("pick a person")
     with db.transaction(conn):
@@ -318,7 +322,7 @@ def save_withdrawal(
     """
     txn = get_transaction(conn, txn_id)
     if txn["amount_cents"] > 0:
-        raise ValueError("this is a deposit; use save_deposit or save_refund")
+        raise ValueError("this is a deposit; use save_person or save_refund")
     return _save_purposed(
         conn, txn_id, purpose_id, weights, remember_split, remember, pattern, applies_month
     )

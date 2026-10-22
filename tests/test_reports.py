@@ -96,6 +96,17 @@ def test_deposits_by_person_october(conn):
     assert groups[-1].name == reports.UNCATEGORIZED  # always last
 
 
+def test_withdrawal_to_person_in_deposits_view(conn):
+    bob = db.get_person_by_name(conn, "Bob")["id"]
+    w = _txn(conn, 99, -30000, "2026-10-21", person=bob)
+    deposits = {g.name: g for g in reports.deposits_by_person(conn, OCT)}
+    assert (deposits["Bob"].count, deposits["Bob"].total_cents) == (2, 50000)
+    assert w in [t["id"] for t in deposits["Bob"].transactions]
+    # Not spending: neither withdrawal view counts it.
+    for view in (reports.withdrawals_by_purpose, reports.withdrawals_by_person):
+        assert all(w not in [t["id"] for t in g.transactions] for g in view(conn, OCT))
+
+
 def test_withdrawals_by_purpose_october(conn):
     assert _summary(reports.withdrawals_by_purpose(conn, OCT)) == {
         "Rent": (1, 300000),  # applies_month override pulls it into October

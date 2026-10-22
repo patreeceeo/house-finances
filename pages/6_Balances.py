@@ -1,4 +1,7 @@
-"""Balances: paid in, share of spending, net and running balance per person."""
+"""Balances: paid in, share of spending, net and running balance per person.
+
+Paid in nets deposits from a person against withdrawals paid to them.
+"""
 
 import pandas as pd
 import streamlit as st
@@ -13,7 +16,8 @@ months = ui.month_selector(conn)
 st.caption(
     f"{ui.describe_months(months)}. Running balance is through the end of "
     + (ui.format_month(months[-1]) if months else "all time")
-    + "; positive is credit, negative is owed. Transfers are left out."
+    + "; positive is credit, negative is owed. Paid in is deposits minus withdrawals"
+    " paid to the person. Transfers are left out."
 )
 
 count, total = balances.uncategorized_withdrawals(conn, months)
@@ -111,9 +115,9 @@ def _show(title: str, df: pd.DataFrame) -> None:
 
 st.subheader(f"{person.name}: {col.removesuffix(' ($)').lower()}, {period}")
 if kind == "paid":
-    _show("Deposits", _deposits_df())
+    _show("Deposits and withdrawals", _deposits_df())
 elif kind == "share":
     _show("Shares of withdrawals and refunds", _shares_df())
 else:
-    _show("Deposits (paid in)", _deposits_df())
+    _show("Deposits and withdrawals (paid in)", _deposits_df())
     _show("Shares of withdrawals and refunds", _shares_df())

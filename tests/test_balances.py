@@ -145,6 +145,18 @@ def test_payout_to_housemate(conn, house):
     assert by_name(balances.balances(conn))["Bob"].running_cents == 0
 
 
+def test_withdrawal_to_person_reduces_paid_in(conn, house):
+    h = house
+    d = tx(conn, "2026-01-01", 10000, person=h["bob"])
+    w = tx(conn, "2026-01-02", -3000, person=h["bob"])
+    tx(conn, "2026-01-03", -900, purpose=h["rent"], weights=[(h["bob"], 1)])
+    bob = by_name(balances.balances(conn))["Bob"]
+    assert (bob.paid_in_cents, bob.share_cents, bob.running_cents) == (7000, 900, 6100)
+    assert [r["id"] for r in balances.paid_in_transactions(conn, h["bob"])] == [w, d]
+    # Paid to a person is not uncategorized.
+    assert balances.uncategorized_withdrawals(conn) == (0, 0)
+
+
 def test_drill_down(conn, house):
     h = house
     d1 = tx(conn, "2026-01-05", 10000, person=h["ann"], description="DEP A")

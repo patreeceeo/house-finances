@@ -1,5 +1,6 @@
 """Categorize: tag deposits with a person (or a refund purpose) and withdrawals
-with a purpose and split; optionally remember the description as a rule.
+with a purpose and split (or a person they paid); optionally remember the
+description as a rule.
 
 Layout: filters, a table of matching transactions (newest first), and an
 editor for the selected row (pick it in the table or the Transaction box).
@@ -53,7 +54,7 @@ by_id = {r["id"]: r for r in rows}
 
 def tag_label(r) -> str:
     if r["person_name"]:
-        return r["person_name"]
+        return r["person_name"] + (" (paid to)" if r["amount_cents"] < 0 else "")
     if r["purpose_name"]:
         return r["purpose_name"] + (" (refund)" if r["amount_cents"] > 0 else "")
     return ""
@@ -165,6 +166,13 @@ with st.container(border=True):
             value=txn["purpose_id"] is not None,
             key=f"{k}_refund",
         )
+        to_person = not refund
+    else:
+        to_person = st.toggle(
+            "Paid to a person (reduces what they have paid in)",
+            value=txn["person_id"] is not None,
+            key=f"{k}_paid_to",
+        )
 
     person_id = purpose_id = None
     new_name = ""
@@ -173,7 +181,7 @@ with st.container(border=True):
     edited = remember_split = False
     purpose_row = None
 
-    if is_deposit and not refund:
+    if to_person:
         # Active people first; others (moved out / not yet in) after, marked,
         # so a moved-out person can still be credited for paying back.
         everyone = db.list_people(conn)
@@ -304,8 +312,8 @@ if clear:
 
 if save:
     try:
-        if (person_id if is_deposit and not refund else purpose_id) is None:
-            raise ValueError("Pick a person." if is_deposit and not refund else "Pick a purpose.")
+        if (person_id if to_person else purpose_id) is None:
+            raise ValueError("Pick a person." if to_person else "Pick a purpose.")
         if split_error:
             raise ValueError(split_error)
         if remember and not pattern.strip():
@@ -322,8 +330,8 @@ if save:
                     existing = db.get_purpose(conn, name)
                     purpose_id = existing["id"] if existing else db.add_purpose(conn, name)
             kwargs = dict(remember=remember, pattern=pattern, applies_month=applies or None)
-            if is_deposit and not refund:
-                result = categorize.save_deposit(conn, tid, person_id, **kwargs)
+            if to_person:
+                result = categorize.save_person(conn, tid, person_id, **kwargs)
             else:
                 save_fn = categorize.save_refund if is_deposit else categorize.save_withdrawal
                 result = save_fn(

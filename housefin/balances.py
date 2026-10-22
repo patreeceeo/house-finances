@@ -4,9 +4,10 @@ Pure query functions over the DB (no Streamlit), used by pages/6_Balances.py.
 
 Definitions (see also the sign convention in :mod:`housefin.splits`):
 
-* **Paid in** - deposits (``amount_cents > 0``) credited to a person
-  (``person_id``). Refund deposits carry a purpose + split and no person, so
-  they are not paid in; they reduce shares instead.
+* **Paid in** - ``SUM(amount_cents)`` of transactions tagged with a person
+  (``person_id``): their deposits count up, withdrawals paid to them count
+  down. Refund deposits carry a purpose + split and no person, so they are
+  not paid in; they reduce shares instead.
 * **Share of spending** - ``SUM(splits.share_cents)``: positive for
   withdrawals, negative for refunds.
 * **Net** = paid in - share, for the selected months.
@@ -72,12 +73,12 @@ def paid_in_totals(
     *,
     through: str | None = None,
 ) -> dict[int, int]:
-    """``{person_id: SUM(deposit amount_cents)}`` (House included)."""
+    """``{person_id: SUM(amount_cents)}`` of person-tagged rows (House included)."""
     clause, params = _month_clause(_norm(months), through)
     rows = conn.execute(
         "SELECT t.person_id, SUM(t.amount_cents) AS total FROM transactions t"
         + _JOIN_PURPOSE
-        + f" WHERE t.amount_cents > 0 AND t.person_id IS NOT NULL AND {_NOT_EXCLUDED}"
+        + f" WHERE t.person_id IS NOT NULL AND {_NOT_EXCLUDED}"
         + clause
         + " GROUP BY t.person_id",
         params,
@@ -160,7 +161,7 @@ def paid_in_transactions(
     *,
     through: str | None = None,
 ) -> list[sqlite3.Row]:
-    """Deposits behind a person's Paid in (newest first).
+    """Deposits and withdrawals behind a person's Paid in (newest first).
 
     Columns: id, date, month, amount_cents, description.
     """
@@ -169,7 +170,7 @@ def paid_in_transactions(
         f"SELECT t.id, t.date, {TXN_MONTH_SQL} AS month, t.amount_cents, t.description"
         " FROM transactions t"
         + _JOIN_PURPOSE
-        + f" WHERE t.amount_cents > 0 AND t.person_id = ? AND {_NOT_EXCLUDED}"
+        + f" WHERE t.person_id = ? AND {_NOT_EXCLUDED}"
         + clause
         + " ORDER BY t.date DESC, t.time DESC, t.id DESC",
         [person_id, *params],
@@ -204,14 +205,14 @@ def share_transactions(
 def uncategorized_withdrawals(
     conn: sqlite3.Connection, months: Iterable[str] | None = None
 ) -> tuple[int, int]:
-    """``(count, total_cents)`` of withdrawals in the months that are in no one's
-    share: no purpose, or a non-excluded purpose without a split. The total is
+    """``(count, total_cents)`` of withdrawals in the months that count toward
+    no one: no person and no purpose, or a non-excluded purpose without a split. The total is
     negative (bank sign) or 0."""
     clause, params = _month_clause(_norm(months), None)
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(t.amount_cents), 0) FROM transactions t"
         + _JOIN_PURPOSE
-        + " WHERE t.amount_cents < 0 AND (t.purpose_id IS NULL OR ("
+        + " WHERE t.amount_cents < 0 AND t.person_id IS NULL AND (t.purpose_id IS NULL OR ("
         + _NOT_EXCLUDED
         + " AND NOT EXISTS (SELECT 1 FROM splits s WHERE s.transaction_id = t.id)))"
         + clause,

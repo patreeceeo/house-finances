@@ -87,7 +87,7 @@ def test_list_filters(data):
     assert {r["id"] for r in cat.list_transactions(conn, search="xfinity")} == {tx["net1"], tx["net2"]}
     assert cat.list_transactions(conn, search="100%") == []
 
-    cat.save_deposit(conn, tx["zelle"], people["Alice"])
+    cat.save_person(conn, tx["zelle"], people["Alice"])
     assert tx["zelle"] not in {r["id"] for r in cat.list_transactions(conn)}
     all_rows = {r["id"]: r for r in cat.list_transactions(conn, status=cat.ALL)}
     assert all_rows[tx["zelle"]]["person_name"] == "Alice"
@@ -110,9 +110,9 @@ def test_list_month_uses_applies_month(data):
 # --- saving ------------------------------------------------------------------
 
 
-def test_save_deposit_manual_and_remember(data):
+def test_save_person_manual_and_remember(data):
     conn, people, tx = data
-    res = cat.save_deposit(conn, tx["zelle"], people["Alice"], remember=True)
+    res = cat.save_person(conn, tx["zelle"], people["Alice"], remember=True)
     assert tuple(tags(conn, tx["zelle"]))[:3] == (people["Alice"], None, "manual")
     assert res.rule_id is not None and res.rule_tagged == 1
     assert tuple(tags(conn, tx["zelle2"]))[:3] == (people["Alice"], None, "rule")
@@ -171,7 +171,7 @@ def test_refund_negative_shares_and_rule(data):
     rule = rules.all_rules(conn)[-1]
     assert (rule.applies_to, rule.purpose_id, rule.person_id) == ("deposit", other, None)
     # switching it back to a plain deposit drops the split
-    cat.save_deposit(conn, tx["refund"], people["Bob"])
+    cat.save_person(conn, tx["refund"], people["Bob"])
     assert split_of(conn, tx["refund"]) == {}
 
 
@@ -186,15 +186,28 @@ def test_transfer_has_no_split(data):
 
 def test_remember_allowed_for_venmo(data):
     conn, people, tx = data
-    cat.save_deposit(conn, tx["venmo"], people["Alice"], remember=True)
+    cat.save_person(conn, tx["venmo"], people["Alice"], remember=True)
     assert tags(conn, tx["venmo"])["category_source"] == "manual"
     assert rules.find_best_rule(conn, "VENMO CASHOUT 555", 5000) is not None
+
+
+def test_withdrawal_to_person(data):
+    conn, people, tx = data
+    rent = db.get_purpose_id(conn, "Rent")
+    cat.save_withdrawal(conn, tx["rent"], rent)
+    assert split_of(conn, tx["rent"])
+    result = cat.save_person(conn, tx["rent"], people["Bob"], remember=True)
+    assert tuple(tags(conn, tx["rent"]))[:3] == (people["Bob"], None, "manual")
+    assert split_of(conn, tx["rent"]) == {}
+    # The rule is a withdrawal rule and tags the matching uncategorized withdrawal.
+    assert result.rule_tagged_ids == [tx["rent_old"]]
+    assert tuple(tags(conn, tx["rent_old"]))[:3] == (people["Bob"], None, "rule")
 
 
 def test_validation(data):
     conn, people, tx = data
     with pytest.raises(ValueError):
-        cat.save_deposit(conn, tx["rent"], people["Alice"])
+        cat.save_person(conn, tx["rent"], 9999)
     with pytest.raises(ValueError):
         cat.save_withdrawal(conn, tx["zelle"], db.get_purpose_id(conn, "Rent"))
     with pytest.raises(ValueError):
@@ -323,6 +336,21 @@ def test_page_deposit_new_person_inline(app_db):
     dana = db.get_person_by_name(conn, "Dana")
     assert dana is not None
     assert tuple(tags(conn, tx["venmo"]))[:3] == (dana["id"], None, "manual")
+
+
+def test_page_withdrawal_paid_to_person(app_db):
+    path, people, tx = app_db
+    at = run_page()
+    select_row(at, tx["net1"])
+    k = f"cat_{tx['net1']}"
+    at.toggle(key=f"{k}_paid_to").set_value(True).run()
+    assert not [s for s in at.selectbox if s.key == f"{k}_purpose"]
+    at.selectbox(key=f"{k}_person").set_value(people["Bob"]).run()
+    at.checkbox(key=f"{k}_remember").uncheck().run()
+    at.button(key=f"{k}_save").click().run()
+    assert not at.exception, at.exception
+    conn = db.connect(path)
+    assert tuple(tags(conn, tx["net1"]))[:3] == (people["Bob"], None, "manual")
 
 
 def test_page_new_purpose_inline_and_filters(app_db):

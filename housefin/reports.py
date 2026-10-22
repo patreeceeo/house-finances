@@ -6,18 +6,22 @@ month of the date) via :func:`housefin.ui.month_filter_sql`.
 
 Views
 -----
-* **Deposits by person** -- deposits (amount > 0) tagged with a person, grouped
-  by that person; total = money in. Refund deposits (a purpose, no person) are
-  *not* shown here; they reduce spending in the two withdrawal views instead.
-  Deposits with neither person nor purpose form the Uncategorized group.
+* **Deposits by person** -- deposits (amount > 0) tagged with a person, plus
+  withdrawals paid to a person, grouped by that person; total = net money in,
+  so withdrawals reduce it (as on the Balances screen). Refund deposits (a
+  purpose, no person) are *not* shown here; they reduce spending in the two
+  withdrawal views instead. Deposits with neither person nor purpose form the
+  Uncategorized group.
 * **Withdrawals by purpose** -- withdrawals plus refund deposits, grouped by
   purpose; total = money out (``-amount_cents``), so refunds reduce it.
-  Withdrawals with no purpose form the Uncategorized group.
+  Withdrawals paid to a person are not shown (they are in Deposits by person).
+  Withdrawals with neither person nor purpose form the Uncategorized group.
 * **Withdrawals by person** -- each person's ``SUM(splits.share_cents)`` over
   withdrawals and refund deposits (refund shares are negative). The House is
-  shown like anyone else. Withdrawals/refunds that have a purpose but no split
-  rows, or withdrawals with no purpose, form the Uncategorized group with
-  their full ``-amount_cents``.
+  shown like anyone else. Withdrawals paid to a person are not shares and are
+  not shown. Withdrawals/refunds that have a purpose but no split rows, or
+  withdrawals with neither person nor purpose, form the Uncategorized group
+  with their full ``-amount_cents``.
 
 Totals are integer cents with a positive "in" (deposits view) or "out"
 (withdrawal views) sign.
@@ -49,6 +53,8 @@ TOTAL_LABELS = {
 _NOT_EXCLUDED = "COALESCE(pu.excluded, 0) = 0"
 # A refund deposit: money in, with a purpose and no person.
 _IS_REFUND = "(t.amount_cents > 0 AND t.person_id IS NULL AND t.purpose_id IS NOT NULL)"
+# Spending: a withdrawal not paid to a person, or a refund deposit.
+_IS_SPENDING = f"((t.amount_cents < 0 AND t.person_id IS NULL) OR {_IS_REFUND})"
 
 _TXN_COLS = (
     "t.id, t.date, t.description, t.amount_cents, t.applies_month, "
@@ -104,7 +110,8 @@ def deposits_by_person(
         f"SELECT {_TXN_COLS}, t.person_id, p.name AS person FROM transactions t"
         " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
         " LEFT JOIN people p ON p.id = t.person_id"
-        f" WHERE t.amount_cents > 0 AND {_NOT_EXCLUDED} AND NOT {_IS_REFUND} AND {where}"
+        f" WHERE ((t.amount_cents > 0 AND NOT {_IS_REFUND}) OR (t.amount_cents < 0 AND t.person_id IS NOT NULL))"
+        f" AND {_NOT_EXCLUDED} AND {where}"
         " ORDER BY t.date, t.time, t.id",
         params,
     ).fetchall()
@@ -124,7 +131,7 @@ def withdrawals_by_purpose(
     rows = conn.execute(
         f"SELECT {_TXN_COLS}, t.purpose_id, pu.name AS purpose FROM transactions t"
         " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
-        f" WHERE (t.amount_cents < 0 OR {_IS_REFUND}) AND {_NOT_EXCLUDED} AND {where}"
+        f" WHERE {_IS_SPENDING} AND {_NOT_EXCLUDED} AND {where}"
         " ORDER BY t.date, t.time, t.id",
         params,
     ).fetchall()
@@ -141,7 +148,7 @@ def withdrawals_by_person(
     conn: sqlite3.Connection, months: list[str] | None = None, *, include_uncategorized: bool = True
 ) -> list[Group]:
     where, params = ui.month_filter_sql(months, "t")
-    cond = f"(t.amount_cents < 0 OR {_IS_REFUND}) AND {_NOT_EXCLUDED} AND {where}"
+    cond = f"{_IS_SPENDING} AND {_NOT_EXCLUDED} AND {where}"
     groups: dict = {}
     shares = conn.execute(
         f"SELECT {_TXN_COLS}, s.person_id, p.name AS person, s.share_cents"

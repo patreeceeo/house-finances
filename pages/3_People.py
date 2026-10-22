@@ -44,7 +44,7 @@ for p in everyone:
             "Status": people.status(p, now),
             "Active from": ui.format_month(p["active_from"]) if p["active_from"] else "",
             "Active until": ui.format_month(p["active_until"]) if p["active_until"] else "",
-            "Deposits": u["transactions"],
+            "Transactions": u["transactions"],
             "Split shares": u["splits"],
             "Rules": u["rules"],
         }

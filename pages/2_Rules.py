@@ -10,8 +10,8 @@ ss = st.session_state
 
 st.title("Rules")
 st.caption(
-    "Rules fill in the person (deposits) or purpose (withdrawals and refunds) of "
-    "matching transactions. Exact rules match the whole description; contains rules "
+    "Rules fill in the person or the purpose of matching transactions (a purpose on a "
+    "deposit makes it a refund). Exact rules match the whole description; contains rules "
     "match a case-insensitive piece of it. Exact beats contains, then the longest "
     "pattern, then the newest rule. Rows you tagged by hand are never changed."
 )
@@ -91,9 +91,7 @@ rid = st.selectbox(
 rule = by_id[rid]
 
 st.subheader("Edit rule")
-targets: list[tuple[str, int]] = []
-if rule.applies_to == rules.DEPOSIT:
-    targets += [("person", pid) for pid in people_by_id]
+targets: list[tuple[str, int]] = [("person", pid) for pid in people_by_id]
 targets += [("purpose", pid) for pid in purposes_by_id]
 current = ("person", rule.person_id) if rule.person_id is not None else ("purpose", rule.purpose_id)
 if current not in targets:  # dangling reference; keep it selectable
@@ -123,8 +121,8 @@ target = st.selectbox(
     index=targets.index(current),
     format_func=fmt_target,
     key=f"rule_target_{rid}",
-    help="Deposit rules set a person, or a purpose for refunds. "
-    "Withdrawal rules set a purpose.",
+    help="Rules set a person (who sent a deposit, or was paid by a withdrawal) "
+    "or a purpose (withdrawals, and refund deposits).",
 )
 if pattern.strip():
     n = rules.preview_match_count(conn, pattern, rule.applies_to, match_type)

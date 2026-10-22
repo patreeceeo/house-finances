@@ -235,7 +235,7 @@ def test_deposit_transfer_and_clear_reset_source(setup):
     dep = add_tx(conn, "2026-02-01", 500)
     cat.save_refund(conn, dep, costco, [(a, 100)])
     assert source(conn, dep) == "manual"
-    cat.save_deposit(conn, dep, a)
+    cat.save_person(conn, dep, a)
     assert source(conn, dep) is None
     w = add_tx(conn, "2026-02-01", -500)
     cat.save_withdrawal(conn, w, costco)

@@ -185,8 +185,6 @@ def test_refund_deposit_rule_sets_purpose_and_clears_person(conn):
 def test_rule_validation(conn):
     alice = db.add_person(conn, "Alice")
     with pytest.raises(ValueError):
-        rules.create_rule(conn, "X", "withdrawal", person_id=alice)
-    with pytest.raises(ValueError):
         rules.create_rule(conn, "X", "deposit")
     with pytest.raises(ValueError):
         rules.create_rule(conn, "X", "deposit", person_id=alice, purpose_id=pid(conn, "Rent"))
@@ -324,3 +322,11 @@ def test_seeded_interest_rule(tmp_path):
     assert rules.all_rules(c) == []
     assert c.execute("SELECT COUNT(*) FROM people WHERE is_house = 1").fetchone()[0] == 1
     c.close()
+
+
+def test_withdrawal_rule_sets_person(conn):
+    alice = db.add_person(conn, "Alice")
+    t = add_txn(conn, "PAYOUT ALICE", -2500)
+    rules.create_rule(conn, "PAYOUT ALICE", "withdrawal", person_id=alice)
+    row = txn(conn, t)
+    assert (row["person_id"], row["purpose_id"], row["category_source"]) == (alice, None, "rule")

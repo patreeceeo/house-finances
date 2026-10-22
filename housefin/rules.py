@@ -1,7 +1,7 @@
 """Remembered rules: match transaction descriptions and fill in person/purpose.
 
-A rule carries a target: ``person_id`` (an ordinary deposit) or ``purpose_id``
-(a withdrawal, or a refund deposit). Applying a rule copies both columns from
+A rule carries a target: ``person_id`` (a deposit they sent, or a withdrawal
+paid to them) or ``purpose_id`` (a withdrawal, or a refund deposit). Applying a rule copies both columns from
 the rule onto the transaction (so exactly one of them ends up set) and marks
 it ``category_source = 'rule'``. Rows tagged ``manual`` are never touched.
 
@@ -145,8 +145,6 @@ def _validate(match_type: str, pattern: str, applies_to: str, person_id, purpose
         raise ValueError("pattern is empty")
     if (person_id is None) == (purpose_id is None):
         raise ValueError("a rule sets exactly one of person_id or purpose_id")
-    if applies_to == WITHDRAWAL and person_id is not None:
-        raise ValueError("withdrawal rules set a purpose, not a person")
     return pattern
 
 

@@ -88,7 +88,7 @@ def test_categorize_deposit_bad_month_keeps_old_tags(conn):
     people, tx = fill(conn)
     before = snapshot(conn)
     with pytest.raises(ValueError):
-        cat.save_deposit(conn, tx["zelle"], people["Alice"], remember=True, applies_month="bad")
+        cat.save_person(conn, tx["zelle"], people["Alice"], remember=True, applies_month="bad")
     assert snapshot(conn) == before
 
 

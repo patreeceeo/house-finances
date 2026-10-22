@@ -24,7 +24,8 @@ total_label = reports.TOTAL_LABELS[view]
 st.caption(
     f"{ui.describe_months(months)}. Transfers are left out."
     + (" Refunds reduce purpose totals and people's shares." if view != reports.DEPOSITS_BY_PERSON
-       else " Refund deposits are counted under Withdrawals instead.")
+       else " Withdrawals paid to a person reduce their total; refund deposits are"
+       " counted under Withdrawals instead.")
 )
 
 if not groups:
