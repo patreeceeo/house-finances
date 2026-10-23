@@ -2,6 +2,8 @@
 
 import pytest
 
+from helpers import add_resident
+
 from housefin import categorize as cat
 from housefin import db, rules, splits
 
@@ -36,7 +38,7 @@ def test_nested_calls_commit_only_at_outermost(tmp_path):
     seen = lambda: other.execute("SELECT COUNT(*) FROM people").fetchone()[0]  # noqa: E731
     before = seen()
     with db.transaction(conn):
-        a = db.add_person(conn, "Alice")  # its own db.transaction joins this one
+        a = add_resident(conn, "Alice")  # its own db.transaction joins this one
         splits.set_purpose_split(conn, db.get_purpose_id(conn, "Rent"), [(a, 1)])
         assert conn.in_transaction
         assert seen() == before  # nothing committed yet
@@ -49,7 +51,7 @@ def test_outer_failure_rolls_back_completed_inner_steps(conn):
     before = snapshot(conn)
     with pytest.raises(RuntimeError):
         with db.transaction(conn):
-            db.add_person(conn, "Alice")
+            add_resident(conn, "Alice")
             db.add_purpose(conn, "Snacks")
             raise RuntimeError("later step failed")
     assert snapshot(conn) == before
@@ -58,10 +60,10 @@ def test_outer_failure_rolls_back_completed_inner_steps(conn):
 
 def test_failing_inner_step_rolls_back_alone(conn):
     with db.transaction(conn):
-        db.add_person(conn, "Alice")
+        add_resident(conn, "Alice")
         with pytest.raises(RuntimeError):
             with db.transaction(conn):
-                db.add_person(conn, "Bob")
+                add_resident(conn, "Bob")
                 raise RuntimeError("inner")
         assert conn.in_transaction  # outer transaction still open
     names = {p["name"] for p in db.list_people(conn)}

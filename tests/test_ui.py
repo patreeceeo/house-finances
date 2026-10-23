@@ -53,6 +53,40 @@ def test_cents_to_dollars():
 def test_format_month():
     assert ui.format_month("2026-10") == "Oct 2026"
     assert ui.format_month("weird") == "weird"
+    assert ui.format_month("2026-07", "de-DE") == "Juli 2026"
+
+
+@pytest.mark.parametrize(
+    "locale, pattern, moment, shown",
+    [
+        ("en-US", "MM/dd/yyyy", "MM/DD/YYYY", "07/09/2026"),
+        ("en-GB", "dd/MM/yyyy", "DD/MM/YYYY", "09/07/2026"),
+        ("de-DE", "dd.MM.yyyy", "DD.MM.YYYY", "09.07.2026"),
+        ("ja", "yyyy/MM/dd", "YYYY/MM/DD", "2026/07/09"),
+        # CLDR puts a narrow no-break space before Bulgarian's 'г.'
+        ("bg", "dd.MM.yyyy\u202f'г'.", "DD.MM.YYYY\u202f[г].", "09.07.2026\u202fг."),
+    ],
+)
+def test_dates_follow_the_browser_locale(locale, pattern, moment, shown):
+    # Day and month padded, four-digit year: how browsers' date inputs show it,
+    # so a date cell reads the same while being edited.
+    assert ui.date_pattern(locale) == pattern
+    assert ui.date_column_format(locale) == moment
+    assert ui.format_date("2026-07-09", locale) == shown
+
+
+def test_dates_without_a_browser_stay_iso():
+    assert ui.date_pattern(None) is None
+    assert ui.date_column_format(None) == "YYYY-MM-DD"
+    assert ui.format_date("2026-07-09") == "2026-07-09"
+    assert ui.format_date("2026-07-09", "zz-ZZ") == "2026-07-09"
+    assert ui.format_date(None) == ""
+
+
+def test_format_day_span():
+    assert ui.format_day_span("2026-07-11", "2026-07-31") == "11–31 Jul"
+    assert ui.format_day_span("2026-07-11", "2026-07-31", "en-US") == "Jul 11\u2009–\u200931"  # thin spaces, per CLDR
+    assert ui.format_day_span("2026-07-11", "2026-07-11", "en-GB") == "11 Jul"
 
 
 def test_normalize_month_selection():
@@ -132,7 +166,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = ["app.py"] + [
     f"pages/{p}.py"
-    for p in ("1_Categorize", "2_Rules", "3_People", "4_Purposes", "5_Reports", "6_Balances")
+    for p in ("1_Categorize", "2_Rules", "3_People", "4_Purposes", "5_Reports", "6_Balances", "7_Rooms")
 ]
 
 

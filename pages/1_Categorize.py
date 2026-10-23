@@ -30,8 +30,10 @@ if flash := ss.pop("_cat_flash", None):
 f1, f2, f3 = st.columns([1.6, 1.3, 2])
 status = f1.radio(
     "Show", ["Uncategorized", "Needs review", "All"], horizontal=True, key="cat_status",
-    help="Needs review: a default split left out someone who wasn't active that month, "
-    "so everyone else's share was scaled up. Save the split to confirm it, or change it.",
+    help="Needs review: a rent payment whose month had a vacant room (choose who covers "
+    "the vacant share), or a default split that left out someone who wasn't in the house "
+    "that month, so everyone else's share was scaled up. Save the split to confirm it, or "
+    "change it.",
 )
 kind = f2.radio("Type", ["All", "Deposits", "Withdrawals"], horizontal=True, key="cat_kind")
 search = f3.text_input(
@@ -70,7 +72,7 @@ def tag_label(r) -> str:
 def row_label(tid: int) -> str:
     r = by_id[tid]
     desc = r["description"] if len(r["description"]) <= 60 else r["description"][:57] + "..."
-    return f"{r['date']} · {ui.format_cents(r['amount_cents'])} · {desc}"
+    return f"{ui.format_date(r['date'])} · {ui.format_cents(r['amount_cents'])} · {desc}"
 
 
 # --- table -------------------------------------------------------------------
@@ -89,17 +91,20 @@ def _on_table_select() -> None:
 st.dataframe(
     [
         {
-            "Date": r["date"],
+            "Date": ui.to_dates([r["date"]])[0],
             "Amount": ui.cents_to_dollars(r["amount_cents"]),
             "Description": r["description"],
             "Person / purpose": tag_label(r),
             "Source": r["category_source"] or "",
-            "Applies to": r["applies_month"] or "",
+            "Applies to": ui.format_month(r["applies_month"]) if r["applies_month"] else "",
             "Review": "Needs review" if r["needs_review"] else "",
         }
         for r in rows
     ],
-    column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
+    column_config={
+        "Date": ui.date_column("Date"),
+        "Amount": st.column_config.NumberColumn(format="$%.2f"),
+    },
     hide_index=True,
     height=min(38 + 35 * len(rows), 360),
     width="stretch",
@@ -144,7 +149,7 @@ def pick_name(rows_, current_id, placeholder, new_label, *, key, extra_label=Non
 
 
 with st.container(border=True):
-    st.subheader(f"{txn['date']} · {ui.format_cents(amount)}")
+    st.subheader(f"{ui.format_date(txn['date'])} · {ui.format_cents(amount)}")
     st.code(txn["description"], language=None)
     source = {"rule": "tagged by a rule", "manual": "tagged by hand"}.get(
         txn["category_source"], "uncategorized"
@@ -186,6 +191,8 @@ with st.container(border=True):
     new_name = ""
     weights: list[tuple[int, float]] = []
     split_error = None
+    save_block = None  # rent: why Save is not allowed yet
+    recalc_confirm = False
     edited = remember_split = False
     purpose_row = None
 
@@ -193,7 +200,8 @@ with st.container(border=True):
         # Active people first; others (moved out / not yet in) after, marked,
         # so a moved-out person can still be credited for paying back.
         everyone = db.list_people(conn)
-        active = [p for p in everyone if p["is_house"] or db.is_active(p, month)]
+        in_house = db.in_house_ids(conn, month)
+        active = [p for p in everyone if p["is_house"] or p["id"] in in_house]
         active_ids = {p["id"] for p in active}
         inactive = [p for p in everyone if p["id"] not in active_ids]
         inactive_ids = {p["id"] for p in inactive}
@@ -208,7 +216,7 @@ with st.container(border=True):
         )
         if person_id == NEW:
             new_name = st.text_input("New person's name", key=f"{k}_new_person")
-            st.caption("They are always active; set a move-in month on the People screen.")
+            st.caption("Assign them a room on the [Rooms page](Rooms) to count them in the house.")
     else:
         purpose_rows = db.list_purposes(conn)
         purpose_id = pick_name(
@@ -218,8 +226,165 @@ with st.container(border=True):
         if purpose_id == NEW:
             new_name = st.text_input("New purpose name", key=f"{k}_new_purpose")
         purpose_row = next((p for p in purpose_rows if p["id"] == purpose_id), None)
+        is_rent = (
+            purpose_row is not None and bool(purpose_row["split_by_rooms"])
+            and not purpose_row["excluded"]
+        )
 
-        if purpose_id is not None and not (purpose_row and purpose_row["excluded"]):
+        if is_rent:
+            fake = {**dict(txn), "applies_month": applies or None}
+            stored = (
+                splits.get_transaction_split(conn, tid) if purpose_id == txn["purpose_id"] else []
+            )
+            if stored:
+                # A stored rent split is kept as it is; "Recalculate from
+                # rooms" replaces it only after the user sees old vs new.
+                left_out = categorize.left_out_for_editor(conn, fake, purpose_id)
+                if left_out:
+                    who = ", ".join(f"{n} ({ui.format_percent(p)})" for n, p in left_out)
+                    st.warning(
+                        f"Needs review: this split was written from the old {purpose_row['name']} "
+                        f"default, which left out {who} (not active in {ui.format_month(month)}), "
+                        "so everyone else's share was scaled up. Saving confirms it as shown; "
+                        "or recalculate it from rooms below."
+                    )
+                origin = categorize.split_origin(conn, fake, purpose_id)
+                st.markdown("**Split** (stored)")
+                st.dataframe(
+                    [{"Person": r["name"], "Share": ui.format_cents(r["share_cents"])}
+                     for r in stored],
+                    hide_index=True,
+                )
+                st.caption(
+                    "Rent split from rooms, as it was when saved."
+                    if origin == splits.DEFAULT else "Split set by hand."
+                )
+                weights = [(r["person_id"], r["weight"]) for r in stored]
+                recalc_key = f"_cat_recalc_{tid}"
+                if not ss.get(recalc_key):
+                    month_changed = (applies or None) != txn["applies_month"]
+                    if st.button(
+                        "Recalculate from rooms", key=f"{k}_recalc",
+                        icon=":material/calculate:", disabled=month_changed,
+                        help="Save the applies-to month first." if month_changed else
+                        "Shows the split from today's room assignments next to this one; "
+                        "nothing changes until you confirm.",
+                    ):
+                        ss[recalc_key] = True
+                        st.rerun()
+                else:
+                    with st.container(border=True):
+                        st.markdown("**Recalculate from rooms**")
+                        recalc_plan = categorize.rent_plan(
+                            conn, txn, None, ss.get(f"{k}_recalc_vacant", [])
+                        )
+                        rs = recalc_plan.split
+                        if rs.error is not None:
+                            st.error(rs.warnings()[0] + " Fix the room percents on the Rooms page.")
+                        if recalc_plan.needs_vacant_choice:
+                            st.warning("Needs review: " + "; ".join(rs.warnings()) + ".")
+                            cand = categorize.split_candidates(conn, month)
+                            names = {p["id"]: p["name"] for p in cand}
+                            st.multiselect(
+                                f"Vacant share ({ui.format_cents(rs.vacant_cents)}) goes to",
+                                list(names), format_func=names.get,
+                                key=f"{k}_recalc_vacant",
+                                placeholder="Choose the House or people",
+                            )
+                        if rs.error is None and not recalc_plan.error:
+                            st.dataframe(
+                                [
+                                    {"Person": n,
+                                     "Old share": ui.format_cents(o) if o is not None else "—",
+                                     "New share": ui.format_cents(nw) if nw is not None else "—",
+                                     "Change": ui.format_cents((nw or 0) - (o or 0))}
+                                    for n, o, nw in categorize.recalc_comparison(
+                                        conn, tid, recalc_plan)
+                                ],
+                                hide_index=True,
+                            )
+                        elif recalc_plan.error and rs.error is None:
+                            st.caption(recalc_plan.error)
+                        r1, r2 = st.columns([1, 1])
+                        recalc_confirm = r1.button(
+                            "Save new split", type="primary", key=f"{k}_recalc_save",
+                            disabled=recalc_plan.error is not None,
+                        )
+                        if r2.button("Cancel", key=f"{k}_recalc_cancel"):
+                            ss.pop(recalc_key, None)
+                            st.rerun()
+            else:
+                vacant_to = ss.get(f"{k}_vacant_{month}", [])
+                plan = categorize.rent_plan(conn, fake, month, vacant_to)
+                rs = plan.split
+                st.markdown(f"**Split by rooms** ({ui.format_month(month)})")
+                if rs.error is not None:
+                    st.error(
+                        rs.warnings()[0] + " Fix the room percents on the Rooms page; "
+                        "no split is offered until then."
+                    )
+                    save_block = rs.warnings()[0]
+                else:
+                    table = [
+                        {"Person": p.name, "Room": p.room, "Nights": str(p.nights),
+                         "Weight": categorize.weight_text(p.weight),
+                         "Share": ui.format_cents(p.share_cents)}
+                        for p in rs.people
+                    ] + [
+                        {"Person": "Vacant", "Room": v.room,
+                         "Nights": f"{v.nights} ({categorize.span_text(v.first, v.last)})",
+                         "Weight": categorize.weight_text(v.weight),
+                         "Share": ui.format_cents(v.amount_cents)}
+                        for v in rs.vacant
+                    ]
+                    if table:
+                        st.dataframe(table, hide_index=True)
+                    st.caption(
+                        f"Weight = room percent × nights; all weights total "
+                        f"{categorize.weight_text(rs.total_weight)} (100 × {rs.days_in_month} days)."
+                    )
+                    if plan.needs_vacant_choice:
+                        st.warning(
+                            "Needs review: " + "; ".join(rs.warnings()) + ". The vacant share "
+                            f"({ui.format_cents(rs.vacant_cents)}) is in nobody's split yet. "
+                            "Choose who covers it before saving; nobody else's share is scaled up."
+                        )
+                        cand = categorize.split_candidates(
+                            conn, month, [(p.person_id, 1) for p in rs.people]
+                        )
+                        names = {p["id"]: p["name"] for p in cand}
+                        st.multiselect(
+                            f"Vacant share ({ui.format_cents(rs.vacant_cents)}) goes to",
+                            list(names), format_func=names.get, key=f"{k}_vacant_{month}",
+                            placeholder="Choose the House or people",
+                            help="Several people split it evenly (whole cents; leftover "
+                            "cents go one each).",
+                        )
+                        if plan.error is None:
+                            st.markdown("**Resulting split**")
+                            st.dataframe(
+                                [
+                                    {"Person": ln.name,
+                                     "Room share": ui.format_cents(ln.room_cents),
+                                     "Vacant share": ui.format_cents(ln.vacant_cents),
+                                     "Total": ui.format_cents(ln.total_cents)}
+                                    for ln in plan.lines
+                                ],
+                                hide_index=True,
+                            )
+                            st.caption(
+                                f"Total {ui.format_cents(sum(ln.total_cents for ln in plan.lines))}"
+                                " = the full payment. Saves as a split set by hand."
+                            )
+                    elif plan.error is None:
+                        st.caption(f"Every room was occupied every night: default split for "
+                                   f"{purpose_row['name']}.")
+                    if plan.error is not None:
+                        if not plan.needs_vacant_choice:
+                            st.warning(plan.error)
+                        save_block = plan.error
+                weights = plan.weights
+        elif purpose_id is not None and not (purpose_row and purpose_row["excluded"]):
             purpose_label = purpose_row["name"] if purpose_row else (new_name.strip() or "new purpose")
             pkey = f"{'new' if purpose_id == NEW else purpose_id}_{month}"
             fake = {**dict(txn), "applies_month": applies or None}
@@ -315,8 +480,10 @@ with st.container(border=True):
             f"{preview.will_tag} other uncategorized will be tagged on save."
         )
 
+    if save_block:
+        st.caption(f"Save is off: {save_block}")
     b1, b2, _ = st.columns([1, 1, 4])
-    save = b1.button("Save", type="primary", key=f"{k}_save")
+    save = b1.button("Save", type="primary", key=f"{k}_save", disabled=bool(save_block))
     clear = txn["category_source"] is not None and b2.button("Clear tags", key=f"{k}_clear")
 
 
@@ -335,10 +502,21 @@ if clear:
     categorize.clear_tags(conn, tid)
     _after_change("Tags cleared; the transaction is uncategorized again.")
 
+if recalc_confirm:
+    try:
+        categorize.recalculate_rent(conn, tid, ss.get(f"{k}_recalc_vacant", []))
+    except ValueError as exc:
+        st.error(str(exc))
+    else:
+        ss.pop(f"_cat_recalc_{tid}", None)
+        _after_change("Rent split recalculated from rooms.")
+
 if save:
     try:
         if (person_id if to_person else purpose_id) is None:
             raise ValueError("Pick a person." if to_person else "Pick a purpose.")
+        if save_block and not to_person:
+            raise ValueError(save_block)
         if split_error:
             raise ValueError(split_error)
         if remember and not pattern.strip():

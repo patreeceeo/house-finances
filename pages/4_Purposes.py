@@ -11,7 +11,8 @@ ss = st.session_state
 st.title("Purposes")
 st.caption(
     "Each withdrawal gets a purpose. A purpose's default split is where a new "
-    "withdrawal's split starts; changing it never changes past withdrawals."
+    "withdrawal's split starts; changing it never changes past withdrawals. "
+    "Rent is split by rooms instead (see the Rooms page)."
 )
 
 
@@ -77,7 +78,7 @@ if flash:
 with st.form("add_purpose", clear_on_submit=False, border=False):
     c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
     c1.text_input("New purpose", key="purpose_new_name", placeholder="e.g. Gas")
-    c2.form_submit_button("Add purpose", on_click=_add, use_container_width=True)
+    c2.form_submit_button("Add purpose", on_click=_add, width="stretch")
 
 people = {p["id"]: p for p in db.list_people(conn)}
 candidates = purposes.split_candidates(conn)
@@ -98,9 +99,14 @@ def _summary(stored: list[tuple[int, float]]) -> str:
 for p in purposes.list_with_usage(conn):
     pid, name = p["id"], p["name"]
     stored = [] if p["excluded"] else splits.get_purpose_split(conn, pid)
-    label = f"**{name}** — " + (
-        "built in, no split" if p["excluded"] else f"default: {_summary(stored)}"
-    )
+    stored = [] if p["split_by_rooms"] else stored
+    if p["excluded"]:
+        summary = "built in, no split"
+    elif p["split_by_rooms"]:
+        summary = "split by rooms"
+    else:
+        summary = f"default: {_summary(stored)}"
+    label = f"**{name}** — {summary}"
     # Keyed + stateful so it stays open when its label (the summary) changes.
     with st.expander(label, key=f"purpose_exp_{pid}", on_change="rerun"):
         if p["protected"]:
@@ -114,18 +120,34 @@ for p in purposes.list_with_usage(conn):
             c1.text_input("Name", value=name, key=f"purpose_name_{pid}")
             c2.button(
                 "Rename", key=f"purpose_rename_{pid}", on_click=_rename, args=(pid, name),
-                use_container_width=True,
+                width="stretch",
             )
             used = purposes.describe_usage(p["usage"])
             c3.button(
                 "Delete", key=f"purpose_delete_{pid}", on_click=_delete, args=(pid, name),
-                disabled=not p["deletable"], use_container_width=True,
-                help=f"In use by {used}" if used else "Delete this unused purpose",
+                disabled=not p["deletable"], width="stretch",
+                help=(
+                    "Split by rooms; cannot be deleted" if p["split_by_rooms"]
+                    else f"In use by {used}" if used else "Delete this unused purpose"
+                ),
             )
-            if used:
+            if p["split_by_rooms"]:
+                st.caption(f"{name} is split by rooms, so it can be renamed but not deleted.")
+            elif used:
                 st.caption(f"Used by {used}; it can be deleted once nothing uses it.")
 
         if p["excluded"]:
+            continue
+
+        if p["split_by_rooms"]:
+            st.markdown("**Split by rooms**")
+            st.info(
+                f"{name} has no default split. Each payment is split by who was in each "
+                "room on each night of its month, using the room percents. Set those and "
+                "who is in which room on the [Rooms page](Rooms). A month with a vacant room is "
+                "not split automatically: the payment waits for review on the Categorize "
+                "page until someone says who covers the vacant share."
+            )
             continue
 
         st.markdown("**Default split**")
@@ -159,9 +181,9 @@ for p in purposes.list_with_usage(conn):
         b1.button(
             "Save default split", key=f"purpose_save_{pid}", on_click=_save_split,
             args=(pid, name, ids, ver), type="primary", disabled=bool(error),
-            use_container_width=True,
+            width="stretch",
         )
         b2.button(
             "Use even split", key=f"purpose_clear_{pid}", on_click=_clear_split,
-            args=(pid, name), disabled=not stored, use_container_width=True,
+            args=(pid, name), disabled=not stored, width="stretch",
         )

@@ -1,5 +1,7 @@
 import pytest
 
+from helpers import add_resident
+
 from housefin import db, rules
 
 
@@ -82,7 +84,7 @@ def test_comcast_contains_rule_matches_varying_numbers(conn):
 def test_sign_restriction(conn):
     dep = add_txn(conn, "Zelle payment from ALICE", 50000)
     wd = add_txn(conn, "Zelle payment from ALICE", -50000)
-    alice = db.add_person(conn, "Alice")
+    alice = add_resident(conn, "Alice")
     _, res = rules.create_rule(conn, "Zelle payment from ALICE", "deposit", person_id=alice)
     assert res.updated == [dep]
     assert txn(conn, dep)["person_id"] == alice
@@ -96,7 +98,7 @@ def test_applies_to_from_source_transaction_sign(conn):
     rule = rules.get_rule(conn, rid)
     assert rule.applies_to == "withdrawal" and rule.match_type == "exact"
 
-    alice = db.add_person(conn, "Alice")
+    alice = add_resident(conn, "Alice")
     dep = add_txn(conn, "Zelle payment from ALICE  X", 100, source="manual", person_id=alice)
     rid2, _ = rules.create_rule_from_transaction(
         conn, dep, pattern="Zelle payment from ALICE", person_id=alice
@@ -172,7 +174,7 @@ def test_apply_rules_to_given_ids_only(conn):
 
 
 def test_refund_deposit_rule_sets_purpose_and_clears_person(conn):
-    alice = db.add_person(conn, "Alice")
+    alice = add_resident(conn, "Alice")
     t = add_txn(conn, "COSTCO REFUND", 500)
     conn.execute("UPDATE transactions SET person_id = ? WHERE id = ?", (alice, t))
     _, res = rules.create_rule(conn, "COSTCO REFUND", "deposit", purpose_id=pid(conn, "Costco"))
@@ -183,7 +185,7 @@ def test_refund_deposit_rule_sets_purpose_and_clears_person(conn):
 
 
 def test_rule_validation(conn):
-    alice = db.add_person(conn, "Alice")
+    alice = add_resident(conn, "Alice")
     with pytest.raises(ValueError):
         rules.create_rule(conn, "X", "deposit")
     with pytest.raises(ValueError):
@@ -283,7 +285,7 @@ def test_list_rules_with_match_counts(conn):
     add_txn(conn, "RECOLOGY", -100)
     add_txn(conn, "RECOLOGY", 100)  # other sign: not counted
     rules.create_rule(conn, "RECOLOGY", "withdrawal", purpose_id=pid(conn, "Recology"))
-    alice = db.add_person(conn, "Alice")
+    alice = add_resident(conn, "Alice")
     rules.create_rule(conn, "NOBODY", "deposit", person_id=alice)
     summaries = rules.list_rules(conn)
     by_pattern = {s.rule.pattern: s for s in summaries}
@@ -325,7 +327,7 @@ def test_seeded_interest_rule(tmp_path):
 
 
 def test_withdrawal_rule_sets_person(conn):
-    alice = db.add_person(conn, "Alice")
+    alice = add_resident(conn, "Alice")
     t = add_txn(conn, "PAYOUT ALICE", -2500)
     rules.create_rule(conn, "PAYOUT ALICE", "withdrawal", person_id=alice)
     row = txn(conn, t)

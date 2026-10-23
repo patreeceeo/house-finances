@@ -61,12 +61,15 @@ for g in groups:
     with st.expander(f"{g.name} · {g.count} · {ui.format_cents(g.total_cents)}"):
         rows = [
             {
-                "Date": t["date"],
-                "Month": t["month"],
+                "Date": ui.to_dates([t["date"]])[0],
+                "Month": ui.format_month(t["month"]),
                 "Description": t["description"],
                 "Amount": ui.format_cents(t["amount_cents"]),
                 value_label: ui.format_cents(t["value_cents"]),
             }
             for t in g.transactions
         ]
-        st.dataframe(rows, hide_index=True, width="stretch")
+        st.dataframe(
+            rows, hide_index=True, width="stretch",
+            column_config={"Date": ui.date_column("Date")},
+        )

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import add_resident
+
 from housefin import db, rules, splits
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,8 +47,8 @@ def data(monkeypatch, tmp_path):
     # Only our own rule: drop the seeded Interest Paid rule.
     with c:
         c.execute("DELETE FROM rules")
-    alice = db.add_person(c, "Alice")
-    bob = db.add_person(c, "Bob")
+    alice = add_resident(c, "Alice")
+    bob = add_resident(c, "Bob")
     internet = db.get_purpose_id(c, "Internet")
     other = db.get_purpose_id(c, "Other")
     splits.set_purpose_split(c, internet, [(alice, 1), (bob, 1)])

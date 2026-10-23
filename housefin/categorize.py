@@ -15,6 +15,10 @@ overwrite it. A save can also:
 Saving a split from an editor is a person's decision, so it also confirms a
 split that was pending review (default split that left someone out).
 
+Rent (the purpose split by rooms) has its own editor helpers at the end of
+this module: :func:`rent_plan` (room split plus who covers a vacant share)
+and :func:`recalculate_rent`.
+
 Each save is one transaction (``db.transaction``): if any step fails, nothing
 from it is kept. Order inside a save matters and is: tag the row -> write its split (and the
 remembered default) -> create the rule -> default splits for rows the rule
@@ -43,7 +47,12 @@ ALL = "all"
 DEPOSITS = "deposits"
 WITHDRAWALS = "withdrawals"
 
-_NEEDS_REVIEW = "EXISTS (SELECT 1 FROM split_left_out l WHERE l.transaction_id = t.id)"
+# A default split that left someone out, or a rent payment with no split
+# because its month had a vacant room (splits.ROOM_REVIEW_SQL).
+_NEEDS_REVIEW = (
+    "(EXISTS (SELECT 1 FROM split_left_out l WHERE l.transaction_id = t.id)"
+    f" OR {splits.ROOM_REVIEW_SQL})"
+)
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -76,8 +85,9 @@ def list_transactions(
 ) -> list[sqlite3.Row]:
     """Transactions newest first, with person/purpose names joined in.
 
-    ``status``: 'uncategorized' (no person and no purpose), 'review' (split
-    pending review: its default left someone out) or 'all'.
+    ``status``: 'uncategorized' (no person and no purpose), 'review' (a
+    default split that left someone out, or a rent payment with no split yet
+    because a room was vacant or the room percents are unusable) or 'all'.
     ``kind``: 'all', 'deposits' (amount > 0) or 'withdrawals' (amount <= 0).
     ``months``: effective months (applies_month, else the date's month); None = all.
     ``search``: case-insensitive substring of the description, person or purpose name.
@@ -366,9 +376,10 @@ def split_candidates(
     """People offered in a split editor: those active in ``month`` (housemates
     by name, then the House), plus anyone already in ``current``."""
     in_current = {pid for pid, _ in current}
+    in_house = db.in_house_ids(conn, month)
     people = [
         p for p in db.list_people(conn)
-        if p["is_house"] or db.is_active(p, month) or p["id"] in in_current
+        if p["is_house"] or p["id"] in in_house or p["id"] in in_current
     ]
     return sorted(people, key=lambda p: (p["is_house"], p["name"].casefold()))
 
@@ -422,3 +433,153 @@ def left_out_for_editor(
     names = {p["id"]: p["name"] for p in db.list_people(conn)}
     percents = splits.to_percents(list(kept) + list(left))
     return [(names.get(pid, str(pid)), percents[pid]) for pid, _ in left]
+
+
+# --- rent (purposes split by rooms) ------------------------------------------------
+#
+# docs/rooms-spec.md, "Review when a room is vacant". A rent payment's split
+# comes from who slept in which room that month (splits.room_split). When a
+# room was vacant, the vacant share belongs to nobody until a person says who
+# covers it: the House or named people. Nothing is assigned automatically and
+# nobody else's share is scaled up.
+#
+# How a chosen vacant assignment is stored: as an ordinary split whose weights
+# are the final shares in cents (as positive numbers), source 'manual'. Each
+# person's share is their room share (exactly as room_split computed it,
+# vacant share counted as one entry) plus their piece of the vacant share;
+# several people taking the vacant share divide it evenly by the usual share
+# rules (compute_shares: round down, leftover cents one each, rotating by
+# transaction id). Because the weights total the payment, compute_shares
+# reproduces those shares to the cent, so what the editor showed is exactly
+# what is saved, and the shares total the full payment. Once stored the
+# payment has split rows, so it leaves Needs review (ROOM_REVIEW_SQL).
+# A fully occupied month is stored as the room weights themselves (the same
+# split rules and imports write, source 'default').
+
+weight_text = splits._weight_text  # '3,100', '1,034.625'
+span_text = splits._span_text  # '11–31 Jul'
+
+
+@dataclass
+class RentLine:
+    """One person's line in a rent split: their room share plus any part of
+    the vacant share they cover (cents, signed as stored)."""
+
+    person_id: int
+    name: str
+    room_cents: int
+    vacant_cents: int
+
+    @property
+    def total_cents(self) -> int:
+        return self.room_cents + self.vacant_cents
+
+
+@dataclass
+class RentPlan:
+    """What a rent payment's split would be (see :func:`rent_plan`).
+
+    ``error`` says why it can't be saved yet (room percents unusable, nobody
+    in a room, or a vacant share nobody covers); ``weights`` is empty then.
+    """
+
+    split: splits.RoomSplit
+    vacant_to: list[int]
+    lines: list[RentLine]
+    weights: list[tuple[int, float]]
+    error: str | None = None
+
+    @property
+    def needs_vacant_choice(self) -> bool:
+        return self.split.error is None and bool(self.split.vacant)
+
+    @property
+    def source(self) -> str:
+        """The split source saving this plan records."""
+        return splits.DEFAULT if self.split.fully_occupied else splits.MANUAL
+
+
+def is_rent(conn: sqlite3.Connection, purpose_id: int | None) -> bool:
+    """Whether a purpose is split by rooms (Rent)."""
+    return splits.is_split_by_rooms(conn, purpose_id)
+
+
+def rent_plan(
+    conn: sqlite3.Connection,
+    txn: sqlite3.Row | dict,
+    month: str | None = None,
+    vacant_to: list[int] | tuple[int, ...] = (),
+) -> RentPlan:
+    """The rent split for transaction ``txn`` in ``month`` (default: its
+    transaction month), with the vacant share (if any) covered by the people
+    in ``vacant_to`` (person ids; the House allowed). Nothing is written.
+
+    See the comment above for how the result is stored.
+    """
+    month = month or splits.transaction_month(txn)
+    rs = splits.room_split(conn, month, -txn["amount_cents"], rotate=txn["id"])
+    vacant_to = list(dict.fromkeys(int(p) for p in vacant_to))
+    if rs.error is not None:
+        return RentPlan(rs, vacant_to, [], [], rs.warnings()[0])
+    lines = {p.person_id: RentLine(p.person_id, p.name, p.share_cents, 0) for p in rs.people}
+    if not rs.people and not rs.vacant:
+        return RentPlan(rs, vacant_to, [], [], "Nobody was in a room this month.")
+    if not rs.vacant:
+        return RentPlan(rs, vacant_to, list(lines.values()), rs.weights())
+    if not vacant_to:
+        return RentPlan(
+            rs, vacant_to, list(lines.values()), [],
+            f"Choose who covers the vacant share ({_cents(rs.vacant_cents)}): "
+            "the House or named people.",
+        )
+    names = {p["id"]: p["name"] for p in db.list_people(conn)}
+    unknown = [pid for pid in vacant_to if pid not in names]
+    if unknown:
+        raise ValueError(f"unknown person id(s) {unknown}")
+    pieces = splits.compute_shares(rs.vacant_cents, [(pid, 1) for pid in vacant_to],
+                                   rotate=txn["id"])
+    for pid, cents in pieces:
+        line = lines.setdefault(pid, RentLine(pid, names[pid], 0, 0))
+        line.vacant_cents += cents
+    ordered = list(lines.values())
+    weights = [(ln.person_id, float(abs(ln.total_cents))) for ln in ordered if ln.total_cents]
+    return RentPlan(rs, vacant_to, ordered, weights)
+
+
+def _cents(cents: int) -> str:
+    sign = "-" if cents < 0 else ""
+    dollars, rem = divmod(abs(int(cents)), 100)
+    return f"{sign}${dollars:,}.{rem:02d}"
+
+
+def recalc_comparison(
+    conn: sqlite3.Connection, txn_id: int, plan: RentPlan
+) -> list[tuple[str, int | None, int | None]]:
+    """``[(name, old_share_cents, new_share_cents)]`` for "Recalculate from
+    rooms": the stored split next to ``plan`` (None = not in that split).
+    People in the new split first (its order), then anyone only in the old."""
+    old = {r["person_id"]: (r["name"], r["share_cents"])
+           for r in splits.get_transaction_split(conn, txn_id)}
+    out = []
+    for ln in plan.lines:
+        if ln.total_cents or ln.person_id in old:
+            out.append((ln.name, old.pop(ln.person_id, (None, None))[1], ln.total_cents))
+    out += [(name, cents, None) for name, cents in old.values()]
+    return out
+
+
+def recalculate_rent(
+    conn: sqlite3.Connection, txn_id: int, vacant_to: list[int] | tuple[int, ...] = ()
+) -> RentPlan:
+    """Replace a rent payment's stored split with its split from rooms now
+    (one payment, on a person's confirmation). ``vacant_to`` covers any
+    vacant share; ValueError if the split can't be made (see :func:`rent_plan`).
+    Tags and the applies-to month are unchanged. Returns the plan saved."""
+    txn = get_transaction(conn, txn_id)
+    if not is_rent(conn, txn["purpose_id"]):
+        raise ValueError("only a rent payment can be recalculated from rooms")
+    plan = rent_plan(conn, txn, None, vacant_to)
+    if plan.error:
+        raise ValueError(plan.error)
+    splits.set_transaction_split(conn, txn_id, plan.weights, source=plan.source)
+    return plan

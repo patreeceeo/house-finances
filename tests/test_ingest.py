@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 import ingest as cli
+from helpers import add_resident
+
 from housefin import db, ingest, rules, splits
 
 HEADER = "Date, Time, Amount, Type, Description\n"
@@ -143,8 +145,8 @@ def test_crash_after_rules_commit_attempt_rolls_back(conn, tmp_path, monkeypatch
 
 
 def test_rules_and_default_split_applied_to_new_rows(conn, tmp_path):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
     util = db.get_purpose_id(conn, "Water")
     splits.set_purpose_split(conn, util, [(a, 1), (b, 3)])
     rules.create_rule(conn, "EXAMPLE UTILITY", "withdrawal", purpose_id=util)

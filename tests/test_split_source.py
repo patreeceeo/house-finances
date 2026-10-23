@@ -4,6 +4,8 @@ import sqlite3
 
 import pytest
 
+from helpers import add_resident
+
 from housefin import categorize as cat
 from housefin import db, rules, splits
 
@@ -40,8 +42,8 @@ def conn():
 
 @pytest.fixture
 def setup(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
     costco = db.get_purpose_id(conn, "Costco")
     water = db.get_purpose_id(conn, "Water")
     return conn, a, b, costco, water

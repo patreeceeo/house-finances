@@ -88,15 +88,137 @@ def months_present(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
-def format_month(month: str) -> str:
-    """'2026-10' -> 'Oct 2026'; anything else is returned unchanged."""
+def format_month(month: str, locale: str | None = None) -> str:
+    """'2026-10' -> 'Oct 2026' in the browser's language (or ``locale``);
+    anything else is returned unchanged."""
     import calendar
+    import datetime as _dt
 
     try:
         year, mon = month.split("-")
-        return f"{calendar.month_abbr[int(mon)]} {int(year)}"
-    except (ValueError, IndexError, AttributeError):
+        first = _dt.date(int(year), int(mon), 1)
+    except (ValueError, IndexError, AttributeError, TypeError):
         return month
+    loc = _babel_locale(locale)
+    if loc is None:
+        return f"{calendar.month_abbr[first.month]} {first.year}"
+    from babel.dates import format_skeleton
+
+    return format_skeleton("yMMM", first, locale=loc)
+
+
+# --- dates -------------------------------------------------------------------
+# Dates are shown in the browser's language, as its own date input shows them
+# (e.g. 31/07/2026 for en-GB, 07/31/2026 for en-US), so a date cell reads the
+# same whether or not it is being edited. Without a browser (tests, scripts)
+# dates stay YYYY-MM-DD.
+
+
+def browser_locale() -> str | None:
+    """The browser's language ('en-GB'), or None outside a browser session."""
+    try:
+        import streamlit as st
+
+        return st.context.locale
+    except Exception:
+        return None
+
+
+def _babel_locale(locale: str | None):
+    from babel import Locale, UnknownLocaleError
+
+    tag = locale or browser_locale()
+    if not tag:
+        return None
+    try:
+        return Locale.parse(tag, sep="-" if "-" in tag else "_")
+    except (UnknownLocaleError, ValueError):
+        return None
+
+
+def date_pattern(locale: str | None = None) -> str | None:
+    """The locale's numeric date pattern with day and month padded to two
+    digits and a four-digit year, as browsers' date inputs show it
+    ('dd/MM/yyyy' for en-GB); None when there is no usable locale."""
+    import re
+
+    loc = _babel_locale(locale)
+    if loc is None:
+        return None
+    from babel.dates import get_date_format
+
+    pattern = get_date_format("short", locale=loc).pattern
+    for letter, width in (("d", 2), ("M", 2), ("y", 4)):
+        pattern = re.sub(f"{letter}+", letter * width, pattern)
+    return pattern
+
+
+def format_date(value, locale: str | None = None) -> str:
+    """A date ('YYYY-MM-DD', date or datetime) in the browser's format; '' for
+    None; text that isn't a date is returned unchanged."""
+    import datetime as _dt
+
+    if value is None or value == "":
+        return ""
+    if isinstance(value, _dt.datetime):
+        value = value.date()
+    elif not isinstance(value, _dt.date):
+        try:
+            value = _dt.date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return str(value)
+    pattern = date_pattern(locale)
+    if pattern is None:
+        return value.isoformat()
+    from babel.dates import format_date as _format
+
+    return _format(value, format=pattern, locale=_babel_locale(locale))
+
+
+def format_day_span(first: str, last: str, locale: str | None = None) -> str:
+    """Nights within one month as day and month: '11–31 Jul' ('Jul 11 – 31'
+    for en-US), or '11 Jul' for a single night."""
+    import datetime as _dt
+
+    a, b = _dt.date.fromisoformat(first), _dt.date.fromisoformat(last)
+    loc = _babel_locale(locale)
+    if loc is None:
+        mon = b.strftime("%b")
+        return f"{a.day} {mon}" if a == b else f"{a.day}–{b.day} {mon}"
+    from babel.dates import format_interval, format_skeleton
+
+    if a == b:
+        return format_skeleton("MMMd", a, locale=loc)
+    return format_interval(a, b, "MMMd", locale=loc)
+
+
+def date_column_format(locale: str | None = None) -> str:
+    """The date pattern as a moment.js format for st.column_config.DateColumn."""
+    pattern = date_pattern(locale)
+    if pattern is None:
+        return "YYYY-MM-DD"
+    out, literal = [], False
+    for part in pattern.split("'"):
+        if literal:
+            out.append(f"[{part}]" if part else "'")
+        else:
+            out.append(part.replace("dd", "DD").replace("yyyy", "YYYY"))
+        literal = not literal
+    return "".join(out)
+
+
+def date_column(label: str, **kwargs):
+    """A DateColumn shown in the browser's date format."""
+    import streamlit as st
+
+    return st.column_config.DateColumn(label, format=date_column_format(), **kwargs)
+
+
+def to_dates(values) -> list:
+    """'YYYY-MM-DD' strings -> datetime.date (None stays None), for date columns."""
+    import datetime as _dt
+
+    return [None if not v else _dt.date.fromisoformat(str(v)[:10]) for v in values]
 
 
 def month_filter_sql(months: list[str] | None, alias: str | None = None) -> tuple[str, list[str]]:

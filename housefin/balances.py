@@ -114,9 +114,11 @@ def balances(conn: sqlite3.Connection, months: Iterable[str] | None = None) -> l
     """Balance rows for the Balances screen, ordered by name.
 
     Rows: every non-House person who is not moved out (as of
-    :func:`reference_month`) and either is active in a selected month (All:
-    has started by the reference month) or has amounts in the selection; plus
-    every moved-out person whose running balance is non-zero.
+    :func:`reference_month`) and either is in a room in a selected month
+    (All: has a room starting by the reference month), has amounts in the
+    selection or has a non-zero running balance (e.g. away that month); plus
+    every moved-out person whose running balance is non-zero. Moved out = no
+    room on or after the reference month and at least one before it.
     """
     months = _norm(months)
     ref = reference_month(conn, months)
@@ -130,6 +132,25 @@ def balances(conn: sqlite3.Connection, months: Iterable[str] | None = None) -> l
         run_paid = paid_in_totals(conn, through=through)
         run_share = share_totals(conn, through=through)
 
+    in_house = set().union(*(db.in_house_ids(conn, m) for m in months)) if months else set()
+    first_ref, last_ref = f"{ref}-01", db.month_end(ref)
+    started = {
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT person_id FROM room_assignments WHERE start_date <= ?", (last_ref,)
+        )
+    }
+    later = {
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT person_id FROM room_assignments"
+            " WHERE end_date IS NULL OR end_date >= ?", (first_ref,)
+        )
+    }
+    before = {
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT person_id FROM room_assignments WHERE start_date < ?", (first_ref,)
+        )
+    }
+
     out = []
     for p in db.list_people(conn, include_house=False):
         pid = p["id"]
@@ -139,16 +160,21 @@ def balances(conn: sqlite3.Connection, months: Iterable[str] | None = None) -> l
             paid_in_cents=paid.get(pid, 0),
             share_cents=share.get(pid, 0),
             running_cents=run_paid.get(pid, 0) - run_share.get(pid, 0),
-            moved_out=p["active_until"] is not None and p["active_until"] < ref,
+            # No room on or after the reference month, at least one before it.
+            moved_out=pid in before and pid not in later,
         )
         if row.moved_out:
             keep = row.running_cents != 0
         else:
-            if months is None:
-                active = p["active_from"] is None or p["active_from"] <= ref
-            else:
-                active = any(db.is_active(p, m) for m in months)
-            keep = active or row.paid_in_cents != 0 or row.share_cents != 0
+            # In a room in a selected month (All: has a room starting by the
+            # reference month).
+            # Someone away for the selected months (rooms before and after)
+            # still shows while their running balance is not zero.
+            active = pid in started if months is None else pid in in_house
+            keep = (
+                active or row.paid_in_cents != 0 or row.share_cents != 0
+                or row.running_cents != 0
+            )
         if keep:
             out.append(row)
     return sorted(out, key=lambda r: r.name.casefold())
@@ -206,8 +232,10 @@ def uncategorized_withdrawals(
     conn: sqlite3.Connection, months: Iterable[str] | None = None
 ) -> tuple[int, int]:
     """``(count, total_cents)`` of withdrawals in the months that count toward
-    no one: no person and no purpose, or a non-excluded purpose without a split. The total is
-    negative (bank sign) or 0."""
+    no one: no person and no purpose, or a non-excluded purpose without a split
+    (this includes rent payments waiting for their vacant share to be
+    assigned: see :func:`rent_awaiting_review`). The total is negative (bank
+    sign) or 0."""
     clause, params = _month_clause(_norm(months), None)
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(t.amount_cents), 0) FROM transactions t"
@@ -215,6 +243,24 @@ def uncategorized_withdrawals(
         + " WHERE t.amount_cents < 0 AND t.person_id IS NULL AND (t.purpose_id IS NULL OR ("
         + _NOT_EXCLUDED
         + " AND NOT EXISTS (SELECT 1 FROM splits s WHERE s.transaction_id = t.id)))"
+        + clause,
+        params,
+    ).fetchone()
+    return row[0], row[1]
+
+
+def rent_awaiting_review(
+    conn: sqlite3.Connection, months: Iterable[str] | None = None
+) -> tuple[int, int]:
+    """``(count, total_cents)`` of the :func:`uncategorized_withdrawals` that
+    are payments of the purpose split by rooms (Rent) with no split yet
+    (:data:`splits.ROOM_REVIEW_SQL`): usually a room was vacant that month and
+    nobody has said who covers its share. The total is in bank sign."""
+    clause, params = _month_clause(_norm(months), None)
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(t.amount_cents), 0) FROM transactions t"
+        " WHERE t.amount_cents < 0 AND t.person_id IS NULL AND "
+        + splits.ROOM_REVIEW_SQL
         + clause,
         params,
     ).fetchone()

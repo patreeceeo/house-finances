@@ -4,6 +4,8 @@ import sqlite3
 
 import pytest
 
+from helpers import add_resident
+
 from housefin import balances
 from housefin import categorize as cat
 from housefin import db, splits
@@ -33,12 +35,12 @@ def weights(conn, tid):
 
 @pytest.fixture
 def setup():
-    """Rent default 40/35/25 Ann/Bob/Moana; Moana moves in 2026-07."""
+    """Water default 40/35/25 Ann/Bob/Moana; Moana moves in 2026-07."""
     conn = db.connect(":memory:")
-    ann = db.add_person(conn, "Ann")
-    bob = db.add_person(conn, "Bob")
-    moana = db.add_person(conn, "Moana", active_from="2026-07")
-    rent = db.get_purpose_id(conn, "Rent")
+    ann = add_resident(conn, "Ann")
+    bob = add_resident(conn, "Bob")
+    moana = add_resident(conn, "Moana", "2026-07")
+    rent = db.get_purpose_id(conn, "Water")
     splits.set_purpose_split(conn, rent, [(ann, 40), (bob, 35), (moana, 25)])
     yield conn, ann, bob, moana, rent
     conn.close()
@@ -166,10 +168,10 @@ def test_migration_backfills_left_out(tmp_path):
 def app_db(monkeypatch, tmp_path):
     path = tmp_path / "app.db"
     conn = db.connect(path)
-    ann = db.add_person(conn, "Ann")
-    bob = db.add_person(conn, "Bob")
-    moana = db.add_person(conn, "Moana", active_from="2026-07")
-    rent = db.get_purpose_id(conn, "Rent")
+    ann = add_resident(conn, "Ann")
+    bob = add_resident(conn, "Bob")
+    moana = add_resident(conn, "Moana", "2026-07")
+    rent = db.get_purpose_id(conn, "Water")
     splits.set_purpose_split(conn, rent, [(ann, 40), (bob, 35), (moana, 25)])
     june = add_tx(conn, "2026-06-01", -100000, rent)
     splits.apply_default_split(conn, [june])
@@ -196,7 +198,7 @@ def test_categorize_page_review_flow(app_db):
     assert at.selectbox(key="cat_selected").value == june
     assert len(at.selectbox(key="cat_selected").options) == 1
     k = f"cat_{june}"
-    assert any("Moana (25%) is in the Rent default split but not active in" in w.value
+    assert any("Moana (25%) is in the Water default split but not active in" in w.value
                for w in at.warning)
     at.checkbox(key=f"{k}_remember").uncheck().run()
     at.button(key=f"{k}_save").click().run()

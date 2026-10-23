@@ -35,7 +35,7 @@ else:
     c2.metric("Deposits / withdrawals", f"{stats['deposits'] or 0:,} / {stats['withdrawals'] or 0:,}")
     c3.metric("Uncategorized", f"{stats['uncategorized'] or 0:,}")
     c4.metric("Imports", f"{imports:,}")
-    st.write(f"Dates: **{stats['first']}** to **{stats['last']}**")
+    st.write(f"Dates: **{ui.format_date(stats['first'])}** to **{ui.format_date(stats['last'])}**")
     if stats["uncategorized"]:
         st.page_link("pages/1_Categorize.py", label="Categorize uncategorized transactions", icon=":material/label:")
 

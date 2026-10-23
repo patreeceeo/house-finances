@@ -1,8 +1,9 @@
-"""People: add housemates, rename, move out, delete."""
+"""People: add housemates, rename, colors, delete."""
 
+import pandas as pd
 import streamlit as st
 
-from housefin import db, people, ui
+from housefin import colors, db, people, ui
 
 st.set_page_config(page_title="People · House Finances", layout="wide")
 conn = ui.get_conn()
@@ -10,10 +11,10 @@ ss = st.session_state
 
 st.title("People")
 st.caption(
-    "Moving someone out keeps their history; from the month after their last month "
-    "they leave the dropdowns. Delete is only possible for someone with no "
-    "transactions or rules. New people are not added to remembered splits; edit a "
-    "split to include them."
+    "Who is in the house comes from room assignments: someone counts for a month "
+    "when they are in a room on any night of it. Delete is only possible for "
+    "someone with no transactions, rules or room assignments. New people are not "
+    "added to remembered splits; edit a split to include them."
 )
 
 flash = ss.pop("_people_flash", None)
@@ -26,46 +27,73 @@ def done(msg: str) -> None:
     st.rerun()
 
 
-NOT_SET = "—"
 now = people.current_month()
 everyone = db.list_people(conn)
-choices = people.month_choices(
-    conn, extra=tuple(m for p in everyone for m in (p["active_from"], p["active_until"]))
-)
 
 # --- list ------------------------------------------------------------------------
+
+STATUS_HELP = {
+    people.IN_THE_HOUSE: "in a room on at least one night this month",
+    people.AWAY: "had a room before this month and has one after it, but none this month",
+    people.NOT_YET_ARRIVED: "their first room starts after this month",
+    people.MOVED_OUT: "had a room before this month and has none from this month on",
+    people.NOT_IN_A_ROOM: "has never been put in a room, so they don't count as in the house",
+}
 
 rows = []
 for p in everyone:
     u = people.usage(conn, p["id"])
+    room = people.current_room(conn, p["id"])
     rows.append(
         {
             "Name": p["name"],
-            "Status": people.status(p, now),
-            "Active from": ui.format_month(p["active_from"]) if p["active_from"] else "",
-            "Active until": ui.format_month(p["active_until"]) if p["active_until"] else "",
+            "Color": p["color"] or "",
+            "Status": people.status(conn, p, now),
+            "Room now": room["name"] if room else "",
             "Transactions": u["transactions"],
             "Split shares": u["splits"],
             "Rules": u["rules"],
         }
     )
-st.dataframe(rows, hide_index=True, width="stretch")
+table = pd.DataFrame(rows)
+
+
+def _swatch(col: pd.Series) -> list[str]:
+    return [
+        f"background-color: {c}; color: {colors.text_color_for(c)}" if c else ""
+        for c in col
+    ]
+
+
+status_label = f"Status in {ui.format_month(now)}"
+st.dataframe(
+    table.rename(columns={"Status": status_label}).style.apply(_swatch, subset=["Color"]),
+    hide_index=True,
+    width="stretch",
+    column_config={
+        "Color": st.column_config.TextColumn(
+            help="Used for them on the Rooms page. Pick another with New color below."
+        ),
+        status_label: st.column_config.TextColumn(
+            help="From room assignments (Rooms page). "
+            + " ".join(f"{k}: {v}." for k, v in STATUS_HELP.items())
+        ),
+        "Room now": st.column_config.TextColumn(help="The room they are in today."),
+    },
+)
+shown = {r["Status"] for r in rows}
+notes = [f"**{k}**: {v}." for k, v in STATUS_HELP.items() if k in shown and k != people.IN_THE_HOUSE]
+if notes:
+    st.caption(" ".join(notes) + " Rooms and dates are set on the [Rooms page](Rooms).")
 
 # --- add ---------------------------------------------------------------------------
 
 with st.form("add_person", clear_on_submit=True):
     st.subheader("Add a person")
-    c1, c2 = st.columns(2)
-    new_name = c1.text_input("Name")
-    new_from = c2.selectbox(
-        "Active from",
-        [NOT_SET] + choices,
-        index=1 + choices.index(now) if now in choices else 0,
-        format_func=lambda m: "Always" if m == NOT_SET else ui.format_month(m),
-    )
+    new_name = st.text_input("Name")
     if st.form_submit_button("Add person", type="primary"):
         try:
-            people.add_person(conn, new_name, None if new_from == NOT_SET else new_from)
+            people.add_person(conn, new_name)
         except people.PersonError as exc:
             st.error(str(exc))
         else:
@@ -93,41 +121,13 @@ with st.form(f"rename_{pid}"):
         else:
             done(f"Renamed {person['name']} to {' '.join(name.split())}.")
 
-if person["is_house"]:
-    st.info("The House is always present: it can be renamed, but not moved out or deleted.")
-    st.stop()
+if st.button("New color", key=f"color_{pid}", help="Pick another random color for them."):
+    people.new_color(conn, pid)
+    done(f"New color for {person['name']}.")
 
-with st.form(f"dates_{pid}"):
-    c1, c2 = st.columns(2)
-    from_opts = [NOT_SET] + choices
-    cur_from = person["active_from"] or NOT_SET
-    active_from = c1.selectbox(
-        "Active from", from_opts, index=from_opts.index(cur_from),
-        format_func=lambda m: "Always" if m == NOT_SET else ui.format_month(m),
-    )
-    until_opts = [NOT_SET] + choices
-    cur_until = person["active_until"] or NOT_SET
-    active_until = c2.selectbox(
-        "Active until (last month, inclusive)", until_opts, index=until_opts.index(cur_until),
-        format_func=lambda m: "Still here" if m == NOT_SET else ui.format_month(m),
-        help="Move out: from the following month they leave the dropdowns. "
-        "Their history, reports and balance stay.",
-    )
-    if st.form_submit_button("Save dates"):
-        new_from_v = None if active_from == NOT_SET else active_from
-        new_until_v = None if active_until == NOT_SET else active_until
-        try:
-            people.set_active_range(conn, pid, new_from_v, new_until_v)
-        except people.PersonError as exc:
-            st.error(str(exc))
-        else:
-            if new_until_v and new_until_v != person["active_until"]:
-                done(
-                    f"{person['name']} moves out after {ui.format_month(new_until_v)}; "
-                    f"from {ui.format_month(people.add_months(new_until_v, 1))} "
-                    "they leave the dropdowns."
-                )
-            done(f"Saved dates for {person['name']}.")
+if person["is_house"]:
+    st.info("The House is always present: it can be renamed, but not put in a room or deleted.")
+    st.stop()
 
 blocker = people.delete_blocker(conn, pid)
 with st.expander("Delete"):

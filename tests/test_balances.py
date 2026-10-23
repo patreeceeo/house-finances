@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from helpers import add_resident
+
 from housefin import balances, db, splits
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,9 +43,9 @@ def conn():
 def house(conn):
     """Ann and Bob always active; Cy moved out after 2026-01."""
     ids = {
-        "ann": db.add_person(conn, "Ann"),
-        "bob": db.add_person(conn, "Bob"),
-        "cy": db.add_person(conn, "Cy", active_until="2026-01"),
+        "ann": add_resident(conn, "Ann"),
+        "bob": add_resident(conn, "Bob"),
+        "cy": add_resident(conn, "Cy", end="2026-01"),
         "house": db.get_house_id(conn),
         "rent": db.get_purpose_id(conn, "Rent"),
         "costco": db.get_purpose_id(conn, "Costco"),
@@ -109,8 +111,40 @@ def test_moved_out_zero_balance_disappears(conn, house):
     assert jan["Cy"].net_cents == 0 and not jan["Cy"].moved_out
 
 
+def test_moved_out_means_no_room_on_or_after_month_and_one_before(conn, house):
+    from helpers import move_in
+
+    h = house
+    # Eve: away for March (rooms before and after it): not moved out.
+    eve = add_resident(conn, "Eve", end="2026-02")
+    move_in(conn, eve, "2026-04")
+    tx(conn, "2026-01-05", -600, purpose=h["costco"], weights=[(eve, 1)])
+    rows = by_name(balances.balances(conn, ["2026-03"]))
+    assert "Eve" in rows and not rows["Eve"].moved_out  # owes, still shown
+    # Cy's last room ended in January: moved out from February on, not before.
+    tx(conn, "2026-01-06", -500, purpose=h["costco"], weights=[(h["cy"], 1)])
+    assert by_name(balances.balances(conn, ["2026-02"]))["Cy"].moved_out
+    assert not by_name(balances.balances(conn, ["2026-01"]))["Cy"].moved_out
+    # Dee only arrives later: never moved out (and hidden before arriving).
+    add_resident(conn, "Dee", "2026-06")
+    assert "Dee" not in by_name(balances.balances(conn, ["2026-03"]))
+
+
+def test_rent_awaiting_review_is_part_of_unsplit_spending(conn, house):
+    h = house
+    tx(conn, "2026-01-01", -1000)  # uncategorized
+    tx(conn, "2026-01-02", -250000, purpose=h["rent"])  # rent, no split (vacant room)
+    tx(conn, "2026-01-03", -9000, purpose=h["rent"], weights=[(h["ann"], 1)])  # split: fine
+    tx(conn, "2026-01-04", -700, purpose=h["costco"])  # other purpose, no split
+    tx(conn, "2026-02-02", -260000, purpose=h["rent"])
+    assert balances.rent_awaiting_review(conn, ["2026-01"]) == (1, -250000)
+    assert balances.rent_awaiting_review(conn) == (2, -510000)
+    assert balances.uncategorized_withdrawals(conn, ["2026-01"]) == (3, -251700)
+    assert balances.rent_awaiting_review(conn, ["2026-03"]) == (0, 0)
+
+
 def test_people_not_yet_active_are_hidden(conn, house):
-    db.add_person(conn, "Dee", active_from="2026-03")
+    add_resident(conn, "Dee", "2026-03")
     tx(conn, "2026-01-01", 100, person=house["ann"])
     tx(conn, "2026-03-01", 100, person=house["ann"])
     assert "Dee" not in {r.name for r in balances.balances(conn, ["2026-01"])}
@@ -207,8 +241,8 @@ def test_reference_month(conn, house):
 def app_db(monkeypatch, tmp_path):
     path = tmp_path / "app.db"
     c = db.connect(path)
-    ann = db.add_person(c, "Ann")
-    cy = db.add_person(c, "Cy", active_until="2026-01")
+    ann = add_resident(c, "Ann")
+    cy = add_resident(c, "Cy", end="2026-01")
     rent = db.get_purpose_id(c, "Rent")
     tx(c, "2026-01-01", -2000, purpose=rent, weights=[(ann, 1), (cy, 1)])
     tx(c, "2026-01-02", 500, person=ann)
@@ -227,6 +261,21 @@ def test_page_renders_table_and_warning(app_db):
     df = at.dataframe[0].value
     assert list(df["Person"]) == ["Ann", "Cy (moved out)"]
     assert list(df["Running balance ($)"]) == [-5.0, -10.0]
+
+
+def test_page_warning_names_rent_waiting_for_vacant_share(app_db):
+    from streamlit.testing.v1 import AppTest
+
+    c = db.connect(app_db)
+    tx(c, "2026-02-03", -150000, purpose=db.get_purpose_id(c, "Rent"))  # no split yet
+    c.close()
+    at = AppTest.from_file(str(ROOT / "pages/6_Balances.py"), default_timeout=30).run()
+    assert not at.exception, at.exception
+    text = " ".join(w.value for w in at.warning)
+    assert "2 withdrawals totalling $1,501.23" in text
+    assert "1 is uncategorized or has no split ($1.23)" in text
+    assert "1 is a rent payment ($1,500.00)" in text
+    assert "room was empty" in text and "who covers the empty room's share" in text
 
 
 def test_page_drill_down(app_db):

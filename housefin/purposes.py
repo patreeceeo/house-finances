@@ -26,6 +26,12 @@ def current_month() -> str:
     return _dt.date.today().strftime("%Y-%m")
 
 
+def is_split_by_rooms(purpose: sqlite3.Row | Mapping) -> bool:
+    """Whether a purpose's split comes from room assignments (Rent): it has
+    no default split; see the Rooms page."""
+    return bool(purpose["split_by_rooms"])
+
+
 def is_protected(purpose: sqlite3.Row | Mapping) -> bool:
     """Built-in purposes that cannot be renamed or deleted (Transfer)."""
     return purpose["name"] == db.TRANSFER
@@ -99,12 +105,17 @@ def describe_usage(counts: Mapping[str, int]) -> str:
 def delete(conn: sqlite3.Connection, purpose_id: int) -> None:
     """Delete an unused purpose (its default split goes with it).
 
-    Refused for Transfer and for purposes still used by transactions, rules
+    Refused for Transfer, for the purpose split by rooms (Rent: nothing else
+    could take that role) and for purposes still used by transactions, rules
     or splits; recategorize those first.
     """
     row = _get(conn, purpose_id)
     if is_protected(row):
         raise PurposeError(f"{row['name']} is built in and cannot be deleted.")
+    if is_split_by_rooms(row):
+        raise PurposeError(
+            f"{row['name']} is split by rooms and cannot be deleted; rename it instead."
+        )
     used = describe_usage(usage(conn, purpose_id))
     if used:
         raise PurposeError(
@@ -123,7 +134,10 @@ def list_with_usage(conn: sqlite3.Connection) -> list[dict]:
         d = dict(row)
         d["usage"] = usage(conn, row["id"])
         d["protected"] = is_protected(row)
-        d["deletable"] = not d["protected"] and not describe_usage(d["usage"])
+        d["split_by_rooms"] = is_split_by_rooms(row)
+        d["deletable"] = (
+            not d["protected"] and not d["split_by_rooms"] and not describe_usage(d["usage"])
+        )
         out.append(d)
     return out
 
@@ -169,6 +183,7 @@ def save_default_split(
     row = _get(conn, purpose_id)
     if row["excluded"]:
         raise PurposeError(f"{row['name']} is left out of reports and has no split.")
+    _refuse_split_by_rooms(row)
     if any(w < 0 for w in weights.values()):
         raise PurposeError("Weights cannot be negative.")
     offered = {p["id"] for p in split_candidates(conn, month)}
@@ -180,7 +195,16 @@ def save_default_split(
     splits.set_purpose_split(conn, purpose_id, kept + new)
 
 
+def _refuse_split_by_rooms(row: sqlite3.Row) -> None:
+    if is_split_by_rooms(row):
+        raise PurposeError(
+            f"{row['name']} is split by rooms, so it has no default split: "
+            "set room percents and who is in which room on the Rooms page."
+        )
+
+
 def clear_default_split(conn: sqlite3.Connection, purpose_id: int) -> None:
-    """Back to the even split among active housemates."""
-    _get(conn, purpose_id)
+    """Back to the even split among active housemates (refused for a purpose
+    split by rooms, which has no default split)."""
+    _refuse_split_by_rooms(_get(conn, purpose_id))
     splits.set_purpose_split(conn, purpose_id, [])

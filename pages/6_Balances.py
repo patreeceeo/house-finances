@@ -22,18 +22,37 @@ st.caption(
 
 count, total = balances.uncategorized_withdrawals(conn, months)
 if count:
+    n_rent, rent_total = balances.rent_awaiting_review(conn, months)
+    n_other = count - n_rent
+    parts = []
+    if n_other:
+        parts.append(
+            f"{n_other} {'are' if n_other != 1 else 'is'} uncategorized or "
+            f"{'have' if n_other != 1 else 'has'} no split "
+            f"({ui.format_cents(-(total - rent_total))}): categorize "
+            f"{'them' if n_other != 1 else 'it'} on the Categorize page."
+        )
+    if n_rent:
+        parts.append(
+            f"{n_rent} {'are rent payments' if n_rent != 1 else 'is a rent payment'} "
+            f"({ui.format_cents(-rent_total)}) for a month when a room was empty for "
+            "some nights (or the room percents need fixing), so nobody has said who "
+            "covers the empty room's share yet. Review "
+            f"{'them' if n_rent != 1 else 'it'} on the Categorize page "
+            "(Show: Needs review)."
+        )
     st.warning(
         f"{count} withdrawal{'s' if count != 1 else ''} totalling "
         f"{ui.format_cents(-total)} in the selected months "
-        f"{'are' if count != 1 else 'is'} uncategorized, so that money is in "
-        "no one's share yet. Categorize them on the Categorize page."
+        f"{'count' if count != 1 else 'counts'} toward no one's share yet. "
+        + " ".join(parts)
     )
 
 count, total = balances.splits_pending_review(conn, months)
 if count:
     st.warning(
         f"{count} split{'s' if count != 1 else ''} totalling {ui.format_cents(-total)} in the "
-        "selected months left out someone who wasn't active that month, so everyone else's "
+        "selected months left out someone who wasn't in the house that month, so everyone else's "
         "share was scaled up. Nobody has confirmed "
         f"{'them' if count != 1 else 'it'} yet: review on the Categorize page (Show: Needs review)."
     )
@@ -91,7 +110,7 @@ def _deposits_df():
     data = balances.paid_in_transactions(conn, person.person_id, sel_months, through=through)
     return pd.DataFrame(
         {
-            "Date": [r["date"] for r in data],
+            "Date": ui.to_dates(r["date"] for r in data),
             "Month": [ui.format_month(r["month"]) for r in data],
             "Description": [r["description"] for r in data],
             "Amount ($)": [ui.cents_to_dollars(r["amount_cents"]) for r in data],
@@ -103,7 +122,7 @@ def _shares_df():
     data = balances.share_transactions(conn, person.person_id, sel_months, through=through)
     return pd.DataFrame(
         {
-            "Date": [r["date"] for r in data],
+            "Date": ui.to_dates(r["date"] for r in data),
             "Month": [ui.format_month(r["month"]) for r in data],
             "Description": [r["description"] for r in data],
             "Purpose": [r["purpose"] or "" for r in data],
@@ -119,6 +138,7 @@ def _show(title: str, df: pd.DataFrame) -> None:
         st.caption("None.")
     else:
         cfg = {c: money for c in df.columns if c.endswith("($)")}
+        cfg["Date"] = ui.date_column("Date")
         st.dataframe(df, hide_index=True, column_config=cfg)
 
 

@@ -1,5 +1,7 @@
 import pytest
 
+from helpers import add_resident
+
 from housefin import db, splits
 from housefin.splits import compute_shares
 
@@ -103,36 +105,36 @@ def test_invalid_weights():
 
 
 def test_even_split_fallback_respects_active_months(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob", active_from="2026-09")
-    c = db.add_person(conn, "Cara", active_until="2026-09")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob", "2026-09")
+    c = add_resident(conn, "Cara", end="2026-09")
+    rent = db.get_purpose_id(conn, "Internet")
     assert splits.default_split_for(conn, rent, "2026-08") == [(a, 1.0), (c, 1.0)]
     assert splits.default_split_for(conn, rent, "2026-09") == [(a, 1.0), (b, 1.0), (c, 1.0)]
     assert splits.default_split_for(conn, rent, "2026-10") == [(a, 1.0), (b, 1.0)]
 
 
 def test_default_drops_moved_out_people_others_keep_weights(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
-    c = db.add_person(conn, "Cara", active_until="2026-09")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
+    c = add_resident(conn, "Cara", end="2026-09")
     house = db.get_house_id(conn)
-    rent = db.get_purpose_id(conn, "Rent")
+    rent = db.get_purpose_id(conn, "Internet")
     splits.set_purpose_split(conn, rent, [(a, 35), (b, 35), (c, 30), (house, 5)])
     assert dict(splits.default_split_for(conn, rent, "2026-09")) == {a: 35, b: 35, c: 30, house: 5}
     assert dict(splits.default_split_for(conn, rent, "2026-10")) == {a: 35, b: 35, house: 5}
 
 
 def test_default_with_nobody_active_falls_back_to_even(conn):
-    a = db.add_person(conn, "Alice")
-    c = db.add_person(conn, "Cara", active_until="2026-09")
+    a = add_resident(conn, "Alice")
+    c = add_resident(conn, "Cara", end="2026-09")
     water = db.get_purpose_id(conn, "Water")
     splits.set_purpose_split(conn, water, [(c, 1)])
     assert splits.default_split_for(conn, water, "2026-10") == [(a, 1.0)]
 
 
 def test_transfer_has_no_default(conn):
-    db.add_person(conn, "Alice")
+    add_resident(conn, "Alice")
     assert splits.default_split_for(conn, db.get_transfer_purpose_id(conn), "2026-10") == []
 
 
@@ -140,8 +142,8 @@ def test_transfer_has_no_default(conn):
 
 
 def test_set_split_and_remember_for_purpose(conn):
-    m, d, p = (db.add_person(conn, n) for n in ("Moana", "David", "Patrick"))
-    rent = db.get_purpose_id(conn, "Rent")
+    m, d, p = (add_resident(conn, n) for n in ("Moana", "David", "Patrick"))
+    rent = db.get_purpose_id(conn, "Internet")
     t1 = _txn(conn, -400000, purpose_id=rent)
     splits.set_transaction_split(conn, t1, [(m, 35), (d, 35), (p, 30)], remember_for_purpose=True)
     assert _shares(conn, t1) == {m: 140000, d: 140000, p: 120000}
@@ -161,16 +163,16 @@ def test_set_split_and_remember_for_purpose(conn):
 
 
 def test_set_split_without_remember_leaves_default(conn):
-    a = db.add_person(conn, "Alice")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    rent = db.get_purpose_id(conn, "Internet")
     t = _txn(conn, -1000, purpose_id=rent)
     splits.set_transaction_split(conn, t, [(a, 1)])
     assert splits.get_purpose_split(conn, rent) == []
 
 
 def test_refund_produces_negative_shares(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
     costco = db.get_purpose_id(conn, "Costco")
     refund = _txn(conn, 2501, purpose_id=costco)
     splits.apply_default_split(conn, [refund])
@@ -182,18 +184,18 @@ def test_refund_produces_negative_shares(conn):
 
 
 def test_apply_default_uses_applies_month(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob", active_from="2026-11")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob", "2026-11")
+    rent = db.get_purpose_id(conn, "Internet")
     t = _txn(conn, -1000, date="2026-10-30", purpose_id=rent, applies_month="2026-11")
     splits.apply_default_split(conn, [t])
     assert _shares(conn, t) == {a: 500, b: 500}
 
 
 def test_apply_default_skips_manual_and_unpurposed_and_clears_transfer(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
+    rent = db.get_purpose_id(conn, "Internet")
     manual = _txn(conn, -1000, purpose_id=rent)
     splits.set_transaction_split(conn, manual, [(a, 1)])
     none = _txn(conn, -1000)
@@ -212,7 +214,7 @@ def test_apply_default_skips_manual_and_unpurposed_and_clears_transfer(conn):
 
 
 def test_house_can_be_in_split(conn):
-    a = db.add_person(conn, "Alice")
+    a = add_resident(conn, "Alice")
     house = db.get_house_id(conn)
     other = db.get_purpose_id(conn, "Other")
     t = _txn(conn, -300, purpose_id=other)
@@ -224,9 +226,9 @@ def test_house_can_be_in_split(conn):
 
 
 def test_share_totals(conn):
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
+    rent = db.get_purpose_id(conn, "Internet")
     transfer = db.get_transfer_purpose_id(conn)
     t_sep = _txn(conn, -1000, date="2026-09-03", purpose_id=rent)
     t_oct = _txn(conn, -2000, date="2026-10-03", purpose_id=rent)
@@ -277,9 +279,9 @@ def _set_purpose(conn, txn_id, purpose_id):
 def test_sync_after_rules_recomputes_clears_and_skips_excluded(conn):
     from housefin import rules
 
-    a = db.add_person(conn, "Alice")
-    b = db.add_person(conn, "Bob")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    b = add_resident(conn, "Bob")
+    rent = db.get_purpose_id(conn, "Internet")
     costco = db.get_purpose_id(conn, "Costco")
     transfer = db.get_transfer_purpose_id(conn)
     splits.set_purpose_split(conn, rent, [(a, 75), (b, 25)])
@@ -307,8 +309,8 @@ def test_sync_after_rules_recomputes_clears_and_skips_excluded(conn):
 
 
 def test_sync_after_rules_accepts_ids_and_empty(conn):
-    a = db.add_person(conn, "Alice")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    rent = db.get_purpose_id(conn, "Internet")
     t = _txn(conn, -500, purpose_id=rent)
     assert splits.sync_after_rules(conn, []) == 0
     assert _shares(conn, t) == {}
@@ -317,8 +319,8 @@ def test_sync_after_rules_accepts_ids_and_empty(conn):
 
 
 def test_sync_after_rules_joins_caller_transaction(conn):
-    a = db.add_person(conn, "Alice")
-    rent = db.get_purpose_id(conn, "Rent")
+    a = add_resident(conn, "Alice")
+    rent = db.get_purpose_id(conn, "Internet")
     t = _txn(conn, -500, purpose_id=rent)
     with pytest.raises(RuntimeError):
         with db.transaction(conn):

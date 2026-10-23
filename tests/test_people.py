@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from housefin import db, people
+from helpers import move_in
+
+from housefin import db, people, rooms, ui
 from housefin.people import PersonError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,11 +59,12 @@ def test_month_choices(conn):
 
 def test_add_person_not_in_remembered_splits(conn):
     rent = db.get_purpose_id(conn, "Rent")
-    a = people.add_person(conn, "  Alice   Ash ", "2026-01")
+    a = people.add_person(conn, "  Alice   Ash ")
     conn.execute("INSERT INTO purpose_splits (purpose_id, person_id, weight) VALUES (?, ?, 1)", (rent, a))
-    b = people.add_person(conn, "Bob", "2026-04")
+    b = people.add_person(conn, "Bob")
     assert people.get_person(conn, a)["name"] == "Alice Ash"
-    assert people.get_person(conn, b)["active_from"] == "2026-04"
+    assert people.usage(conn, b)["room_assignments"] == 0
+    assert people.status(conn, b, "2026-04") == "Not in a room"
     assert people.usage(conn, b)["purpose_splits"] == 0
 
 
@@ -71,8 +74,6 @@ def test_add_person_validation(conn):
         people.add_person(conn, "alice")
     with pytest.raises(PersonError):
         people.add_person(conn, "   ")
-    with pytest.raises(PersonError):
-        people.add_person(conn, "Carol", "2026/01")
 
 
 def test_rename_history_follows(conn):
@@ -96,56 +97,63 @@ def test_house_renamable(conn):
     assert people.get_person(conn, house)["is_house"] == 1
 
 
-# --- move out -----------------------------------------------------------------------
+# --- status, rooms, colors ------------------------------------------------------------
 
 
-def test_move_out_leaves_dropdowns_after_month(conn):
-    a = people.add_person(conn, "Alice", "2026-01")
-    b = people.add_person(conn, "Bob", "2026-01")
-    people.move_out(conn, a, "2026-05")
-    assert names(db.active_people(conn, "2026-05")) == ["Alice", "Bob"]
-    assert names(db.active_people(conn, "2026-06")) == ["Bob"]
-    assert people.status(people.get_person(conn, a), "2026-06") == "Moved out"
-    assert people.status(people.get_person(conn, a), "2026-05") == "Active"
-    # Still listed (history intact) and can come back.
+def test_status_from_room_assignments(conn):
+    a = people.add_person(conn, "Alice")
+    room = rooms.add_room(conn, "Front", 50)
+    rooms.add_assignment(conn, room, a, "2026-01-20", "2026-05-03")
+    assert people.status(conn, a, "2025-12") == "Not yet arrived"
+    assert people.status(conn, a, "2026-01") == "In the house"
+    assert people.status(conn, people.get_person(conn, a), "2026-05") == "In the house"
+    assert people.status(conn, a, "2026-06") == "Moved out"
+    assert people.moved_out(conn, a, "2026-06") and not people.moved_out(conn, a, "2026-05")
+    # Back again later: away in between, then in the house.
+    rooms.add_assignment(conn, room, a, "2026-09-01")
+    assert people.status(conn, a, "2026-07") == "Away"
+    assert people.status(conn, a, "2027-03") == "In the house"
+    assert names(db.active_people(conn, "2026-06")) == []
+    assert names(db.active_people(conn, "2026-05")) == ["Alice"]
+    # History stays listed.
     assert "Alice" in names(db.list_people(conn))
-    people.clear_move_out(conn, a)
-    assert names(db.active_people(conn, "2027-01")) == ["Alice", "Bob"]
-    assert b
 
 
-def test_move_out_validation(conn):
-    a = people.add_person(conn, "Alice", "2026-04")
-    with pytest.raises(PersonError):
-        people.move_out(conn, a, "2026-03")
-    with pytest.raises(PersonError):
-        people.move_out(conn, a, None)
-    with pytest.raises(PersonError):
-        people.set_active_range(conn, a, "2026-06", "2026-05")
-    people.set_active_range(conn, a, "2026-02", "2026-08")
-    p = people.get_person(conn, a)
-    assert (p["active_from"], p["active_until"]) == ("2026-02", "2026-08")
-    people.set_active_range(conn, a, None, None)
-    p = people.get_person(conn, a)
-    assert (p["active_from"], p["active_until"]) == (None, None)
-    people.move_out(conn, a, "2026-09")
-    with pytest.raises(PersonError):
-        people.set_active_from(conn, a, "2026-10")
-    assert people.status(people.get_person(conn, people.add_person(conn, "Zed", "2027-01")), "2026-10") == "Not yet active"
+def test_current_room(conn):
+    a = people.add_person(conn, "Alice")
+    front = rooms.add_room(conn, "Front", 50)
+    rooms.add_assignment(conn, front, a, "2026-01-01", "2026-01-31")
+    assert people.current_room(conn, a, "2026-01-31")["name"] == "Front"
+    assert people.current_room(conn, a, "2026-02-01") is None
 
 
-def test_house_cannot_move_out_or_delete(conn):
+def test_new_color_differs(conn):
+    a = people.add_person(conn, "Alice")
+    old = people.get_person(conn, a)["color"]
+    new = people.new_color(conn, a)
+    assert new != old and people.get_person(conn, a)["color"] == new
+
+
+def test_not_in_a_room_list(conn):
+    a = people.add_person(conn, "Alice")
+    with db.transaction(conn):
+        conn.execute(
+            "INSERT INTO old_active_months (person_id, active_from, active_until)"
+            " VALUES (?, '2025-01', '2025-06')", (a,),
+        )
+    assert [tuple(r)[1:] for r in people.not_in_a_room(conn)] == [
+        ("Alice", people.get_person(conn, a)["color"], "2025-01", "2025-06")
+    ]
+    people.dismiss_not_in_a_room(conn, a)
+    assert people.not_in_a_room(conn) == []
+
+
+def test_house_cannot_be_deleted(conn):
     house = db.get_house_id(conn)
-    with pytest.raises(PersonError):
-        people.move_out(conn, house, "2026-05")
-    with pytest.raises(PersonError):
-        people.set_active_range(conn, house, None, "2026-05")
-    with pytest.raises(PersonError):
-        people.set_active_from(conn, house, "2026-05")
     assert not people.can_delete(conn, house)
     with pytest.raises(PersonError):
         people.delete_person(conn, house)
-    assert people.status(people.get_person(conn, house), "2026-05") == "House"
+    assert people.status(conn, house, "2026-05") == "House"
 
 
 # --- delete ----------------------------------------------------------------------------
@@ -198,6 +206,12 @@ def test_delete_blocked_by_rule(conn):
         people.delete_person(conn, a)
 
 
+def test_delete_blocked_by_room_assignment(conn):
+    a = people.add_person(conn, "Alice")
+    move_in(conn, a)
+    assert "1 room assignment" in people.delete_blocker(conn, a)
+
+
 def test_unknown_person(conn):
     with pytest.raises(PersonError):
         people.get_person(conn, 9999)
@@ -210,9 +224,10 @@ def test_unknown_person(conn):
 def app_db(monkeypatch, tmp_path):
     path = tmp_path / "app.db"
     c = db.connect(path)
-    a = people.add_person(c, "Alice", "2026-01")
+    a = people.add_person(c, "Alice")
+    move_in(c, a, "2026-01")
     _tx(c, 1, amount=500, person_id=a)
-    people.add_person(c, "Bob", "2026-01")
+    people.add_person(c, "Bob")
     c.close()
     monkeypatch.setenv("HOUSEFIN_DB", str(path))
     return path
@@ -228,40 +243,54 @@ def test_page_lists_people(app_db):
     at = _app()
     assert not at.exception, at.exception
     df = at.dataframe[0].value
+    status = f"Status in {ui.format_month(people.current_month())}"
+    assert list(df.columns[:4]) == ["Name", "Color", status, "Room now"]
     assert list(df["Name"]) == ["House", "Alice", "Bob"]
-    assert list(df["Status"]) == ["House", "Active", "Active"]
-
-
-def test_page_add_and_move_out_and_delete(app_db):
-    at = _app()
-    at.text_input[0].set_value("Carol")
-    at.button[0].click().run()  # Add person
-    assert not at.exception, at.exception
+    assert list(df[status]) == ["House", "In the house", "Not in a room"]
+    assert list(df["Room now"]) == ["", "Alice's room", ""]
     c = db.connect(app_db)
-    assert db.get_person_by_name(c, "Carol") is not None
+    assert list(df["Color"]) == [p["color"] for p in db.list_people(c)]
+    c.close()
+    assert all(c.startswith("#") for c in df["Color"])
+    # No active-month or move-out controls anywhere.
+    labels = [w.label for w in (*at.text_input, *at.selectbox, *at.button)]
+    assert not any("active" in l.lower() or "move" in l.lower() for l in labels)
+    # Statuses other than "In the house" are explained in plain words.
+    assert any("**Not in a room**: has never been put in a room" in x.value for x in at.caption)
 
-    # House: rename only.
-    assert any("not moved out or deleted" in i.value for i in at.info)
 
-    # Bob: move out.
-    bob = db.get_person_by_name(c, "Bob")["id"]
-    at.selectbox(key="people_edit_pid").set_value(bob).run()
+def test_page_status_away_moved_out_not_yet_arrived(app_db):
+    now = people.current_month()
+    c = db.connect(app_db)
+    for name, start, end in (
+        ("Gone", "2020-01", people.add_months(now, -2)),
+        ("Later", people.add_months(now, 2), None),
+    ):
+        move_in(c, people.add_person(c, name), start, end)
+    away = people.add_person(c, "Traveller")
+    move_in(c, away, "2020-01", people.add_months(now, -1))
+    move_in(c, away, people.add_months(now, 1), None)
+    c.close()
+    at = _app()
     assert not at.exception, at.exception
-    until = [s for s in at.selectbox if s.label.startswith("Active until")][0]
-    until.set_value("2026-05")
-    [b for b in at.button if b.label == "Save dates"][0].click().run()
-    assert not at.exception, at.exception
-    assert db.get_person_by_name(c, "Bob")["active_until"] == "2026-05"
-    assert "Bob" not in names(db.active_people(c, "2026-06"))
+    df = at.dataframe[0].value
+    status = dict(zip(df["Name"], df[f"Status in {ui.format_month(now)}"]))
+    assert status["Gone"] == "Moved out"
+    assert status["Later"] == "Not yet arrived"
+    assert status["Traveller"] == "Away"
+    text = " ".join(x.value for x in at.caption)
+    for s in ("Moved out", "Not yet arrived", "Away", "Not in a room"):
+        assert f"**{s}**" in text
+    assert "has one after it, but none this month" in text
 
-    # Bob has nothing tagged: delete.
-    at.checkbox(key=f"del_confirm_{bob}").check().run()
-    at.button(key=f"del_{bob}").click().run()
-    assert not at.exception, at.exception
-    assert db.get_person_by_name(c, "Bob") is None
 
-    # Alice has a transaction: delete blocked.
-    alice = db.get_person_by_name(c, "Alice")["id"]
-    at.selectbox(key="people_edit_pid").set_value(alice).run()
-    assert any("move them out instead" in x.value for x in at.caption)
+def test_page_color_swatch_has_readable_text(app_db):
+    from housefin import colors
+
+    at = _app()
+    styles = at.dataframe[0].proto.arrow_data.styler.styles
+    c = db.connect(app_db)
+    for p in db.list_people(c):
+        bg = p["color"]
+        assert f"background-color: {bg}; color: {colors.text_color_for(bg)}" in styles
     c.close()

@@ -1,8 +1,9 @@
-"""People: add, rename, move out, delete (data layer for the People screen).
+"""People: add, rename, colors, status, delete (data layer for the People screen).
 
-Months are 'YYYY-MM' text; active_from / active_until are both inclusive and
-NULL means unbounded (see db.is_active / db.active_people). The House is
-always present: it can be renamed but never moved out or deleted.
+Months are 'YYYY-MM' text. Who is in the house comes from room assignments
+(housefin.rooms; see db.is_active / db.active_people): a person is in the
+house for a month when assigned to any room on any night of it. The House is
+always present: it can be renamed but never assigned to a room or deleted.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import datetime as _dt
 import re
 import sqlite3
 
-from housefin import db
+from housefin import colors, db, rooms
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -89,6 +90,7 @@ def usage(conn: sqlite3.Connection, person_id: int) -> dict[str, int]:
         "splits": q("SELECT COUNT(*) FROM splits WHERE person_id = ?"),
         "rules": q("SELECT COUNT(*) FROM rules WHERE person_id = ?"),
         "purpose_splits": q("SELECT COUNT(*) FROM purpose_splits WHERE person_id = ?"),
+        "room_assignments": q("SELECT COUNT(*) FROM room_assignments WHERE person_id = ?"),
     }
 
 
@@ -108,10 +110,11 @@ def delete_blocker(conn: sqlite3.Connection, person_id: int) -> str | None:
         reasons.append(f"{n} transaction{'s' if n != 1 else ''}")
     if u["rules"]:
         reasons.append(f"{u['rules']} rule{'s' if u['rules'] != 1 else ''}")
+    n_rooms = u["room_assignments"]
+    if n_rooms:
+        reasons.append(f"{n_rooms} room assignment{'s' if n_rooms != 1 else ''}")
     if reasons:
-        return (
-            f"{person['name']} has {' and '.join(reasons)}; move them out instead."
-        )
+        return f"{person['name']} has {' and '.join(reasons)}, so they cannot be deleted."
     return None
 
 
@@ -135,15 +138,12 @@ def _clean_name(conn: sqlite3.Connection, name: str, exclude_id: int | None = No
     return name
 
 
-def add_person(conn: sqlite3.Connection, name: str, active_from: str | None = None) -> int:
-    """Add a housemate. They are not added to any remembered split."""
+def add_person(conn: sqlite3.Connection, name: str) -> int:
+    """Add a housemate with a color far from everyone else's. They are not
+    added to any remembered split, and are not in the house until assigned
+    to a room (housefin.rooms)."""
     name = _clean_name(conn, name)
-    active_from = check_month(active_from)
-    with db.transaction(conn):
-        cur = conn.execute(
-            "INSERT INTO people (name, active_from) VALUES (?, ?)", (name, active_from)
-        )
-    return cur.lastrowid
+    return db.add_person(conn, name)
 
 
 def rename_person(conn: sqlite3.Connection, person_id: int, name: str) -> None:
@@ -154,56 +154,22 @@ def rename_person(conn: sqlite3.Connection, person_id: int, name: str) -> None:
         conn.execute("UPDATE people SET name = ? WHERE id = ?", (name, person_id))
 
 
-def set_active_from(conn: sqlite3.Connection, person_id: int, month: str | None) -> None:
+def new_color(conn: sqlite3.Connection, person_id: int) -> str:
+    """Give a person another random color, distinct from everyone else's.
+    Returns the new '#rrggbb'."""
     person = get_person(conn, person_id)
-    if person["is_house"]:
-        raise PersonError("The House is always active.")
-    month = check_month(month)
-    until = person["active_until"]
-    if month and until and month > until:
-        raise PersonError("Active from cannot be after the move-out month.")
-    with db.transaction(conn):
-        conn.execute("UPDATE people SET active_from = ? WHERE id = ?", (month, person_id))
-
-
-def move_out(conn: sqlite3.Connection, person_id: int, last_month: str) -> None:
-    """Set the last month (inclusive) a person is active; from the following
-    month they leave the dropdowns. History is untouched."""
-    person = get_person(conn, person_id)
-    if person["is_house"]:
-        raise PersonError("The House cannot be moved out.")
-    last_month = check_month(last_month)
-    if last_month is None:
-        raise PersonError("Pick the last month they lived here.")
-    start = person["active_from"]
-    if start and last_month < start:
-        raise PersonError("The move-out month cannot be before their Active from month.")
-    with db.transaction(conn):
-        conn.execute("UPDATE people SET active_until = ? WHERE id = ?", (last_month, person_id))
-
-
-def clear_move_out(conn: sqlite3.Connection, person_id: int) -> None:
-    """Undo a move-out (they become current again)."""
-    get_person(conn, person_id)
-    with db.transaction(conn):
-        conn.execute("UPDATE people SET active_until = NULL WHERE id = ?", (person_id,))
-
-
-def set_active_range(
-    conn: sqlite3.Connection, person_id: int, active_from: str | None, active_until: str | None
-) -> None:
-    """Set both bounds at once (None = unbounded / still here)."""
-    person = get_person(conn, person_id)
-    if person["is_house"]:
-        raise PersonError("The House is always active and cannot be moved out.")
-    active_from, active_until = check_month(active_from), check_month(active_until)
-    if active_from and active_until and active_from > active_until:
-        raise PersonError("Active from cannot be after Active until.")
-    with db.transaction(conn):
-        conn.execute(
-            "UPDATE people SET active_from = ?, active_until = ? WHERE id = ?",
-            (active_from, active_until, person_id),
+    others = [
+        r[0] for r in conn.execute(
+            "SELECT color FROM people WHERE id != ? AND color IS NOT NULL", (person_id,)
         )
+    ]
+    color = (
+        colors.another_color(person["color"], others)
+        if person["color"] else colors.new_color(others)
+    )
+    with db.transaction(conn):
+        conn.execute("UPDATE people SET color = ? WHERE id = ?", (color, person_id))
+    return color
 
 
 def delete_person(conn: sqlite3.Connection, person_id: int) -> None:
@@ -217,12 +183,76 @@ def delete_person(conn: sqlite3.Connection, person_id: int) -> None:
         conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
 
 
-def status(person: sqlite3.Row, month: str) -> str:
-    """'House', 'Active', 'Moved out' or 'Not yet active' as of `month`."""
+IN_THE_HOUSE = "In the house"
+MOVED_OUT = "Moved out"
+NOT_YET_ARRIVED = "Not yet arrived"
+AWAY = "Away"
+NOT_IN_A_ROOM = "Not in a room"
+HOUSE = "House"
+
+
+def status(conn: sqlite3.Connection, person: sqlite3.Row | int, month: str) -> str:
+    """Where a person stands in 'YYYY-MM', from their room assignments:
+
+    * 'House' for the House;
+    * 'In the house': in a room on any night of the month;
+    * 'Moved out': no room on or after the month, at least one before it;
+    * 'Not yet arrived': a room after the month, none before it;
+    * 'Away': rooms both before and after the month but none in it;
+    * 'Not in a room': no room assignment at all.
+    """
+    if isinstance(person, int):
+        person = get_person(conn, person)
     if person["is_house"]:
-        return "House"
-    if person["active_until"] and person["active_until"] < month:
-        return "Moved out"
-    if person["active_from"] and person["active_from"] > month:
-        return "Not yet active"
-    return "Active"
+        return HOUSE
+    first, last = rooms.month_bounds(month)
+    before, during, after = conn.execute(
+        "SELECT COALESCE(SUM(start_date < :first), 0),"
+        " COALESCE(SUM(start_date <= :last AND (end_date IS NULL OR end_date >= :first)), 0),"
+        " COALESCE(SUM(end_date IS NULL OR end_date > :last), 0)"
+        " FROM room_assignments WHERE person_id = :pid",
+        {"first": first, "last": last, "pid": person["id"]},
+    ).fetchone()
+    if during:
+        return IN_THE_HOUSE
+    if before and after:
+        return AWAY
+    if before:
+        return MOVED_OUT
+    if after:
+        return NOT_YET_ARRIVED
+    return NOT_IN_A_ROOM
+
+
+def moved_out(conn: sqlite3.Connection, person_id: int, month: str) -> bool:
+    """No room on or after 'YYYY-MM' and at least one before it (the House
+    never moves out)."""
+    return status(conn, person_id, month) == MOVED_OUT
+
+
+def current_room(
+    conn: sqlite3.Connection, person_id: int, date: str | None = None
+) -> sqlite3.Row | None:
+    """The room a person is in on ``date`` ('YYYY-MM-DD', default today), or None."""
+    room_id = rooms.room_of(conn, person_id, date or _dt.date.today().isoformat())
+    return None if room_id is None else rooms.get_room(conn, room_id)
+
+
+def not_in_a_room(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """People the rooms migration could not place (not in the Rent default
+    split), with their old months, who still have no room assignment, by
+    name. Columns: id, name, color, active_from, active_until ('YYYY-MM' or
+    NULL = not set)."""
+    return conn.execute(
+        "SELECT p.id, p.name, p.color, o.active_from, o.active_until"
+        " FROM old_active_months o JOIN people p ON p.id = o.person_id"
+        " WHERE NOT EXISTS (SELECT 1 FROM room_assignments ra WHERE ra.person_id = p.id)"
+        " ORDER BY p.name COLLATE NOCASE"
+    ).fetchall()
+
+
+def dismiss_not_in_a_room(conn: sqlite3.Connection, person_id: int) -> None:
+    """Drop someone from the "Not in a room" list without giving them a room
+    (e.g. they left before any recorded month). Their old months are forgotten."""
+    with db.transaction(conn):
+        conn.execute("DELETE FROM old_active_months WHERE person_id = ?", (person_id,))
