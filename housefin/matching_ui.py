@@ -164,10 +164,14 @@ def component_data(
     groups: Sequence[Group],
     running_cents: int,
     locale: str | None = None,
+    last_event: str | None = None,
 ) -> dict:
-    """Everything the component shows, JSON-serializable."""
+    """Everything the component shows, JSON-serializable. ``last_event`` is
+    the id of the last edit handled, so the data changes (and the component
+    redraws and clears its busy state) even when an edit changed nothing."""
     return {
         "person": person_id,
+        "last_event": last_event,
         "name": name,
         "running": ui.format_cents(running_cents),
         "running_tone": tone(running_cents),
@@ -356,7 +360,7 @@ button.link:hover { text-decoration: underline; }
 .collapsed .summary { color: var(--muted); font-size: .85rem; }
 .empty { padding: .85rem 1.25rem; color: var(--muted); font-size: .9rem; }
 .selbar { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; padding: .65rem 1.25rem; background: var(--surface); border-top: 2px solid var(--accent-line); border-radius: 0 0 8px 8px; font-size: .9rem; box-shadow: 0 -4px 14px rgb(0 0 0 / .08); }
-.selbar[hidden] { display: none; }
+.selbar[hidden], .selbar [hidden] { display: none; }
 .selbar b { font-weight: 600; }
 .sel-label { display: inline-flex; align-items: center; gap: .4rem; margin: 0; flex: 0 1 22rem; min-width: 0; }
 .sel-label select { text-transform: none; letter-spacing: 0; font-weight: 400; flex: 1; min-width: 0; width: 100%; }
@@ -473,6 +477,8 @@ export default function (component) {
     });
   };
   const keysOf = (ks) => ks.map((k) => { const { it } = items.get(k); return [it.tid, it.side]; });
+  // True when every item in ks is already in the group with this key.
+  const isHome = (key, ks) => ks.length > 0 && ks.every((k) => items.get(k)?.g.key === key);
 
   function render() {
     q(".balance-fig").textContent = data.running;
@@ -497,10 +503,13 @@ export default function (component) {
     const bar = q(".selbar");
     bar.hidden = ui.selected.size === 0;
     q(".sel-count").textContent = ui.selected.size;
+    // Leave out the group that already holds every selected item.
+    const targets = groups.filter((g) => !isHome(g.key, [...ui.selected]));
     const moveTo = q(".move-to");
     const prev = moveTo.value;
-    moveTo.innerHTML = groups.map((g) => `<option value="${esc(g.key)}">${esc(g.option)}</option>`).join("");
-    if (byKey.has(prev)) moveTo.value = prev;
+    moveTo.innerHTML = targets.map((g) => `<option value="${esc(g.key)}">${esc(g.option)}</option>`).join("");
+    if (targets.some((g) => g.key === prev)) moveTo.value = prev;
+    q(".sel-label").hidden = q(".move-btn").hidden = !targets.length;
   }
 
   const groupsEl = q(".groups");
@@ -562,7 +571,7 @@ export default function (component) {
     e.preventDefault();
     const ks = ui.drag; ui.drag = []; clearOver();
     const target = el.dataset.key;
-    if (ks.every((k) => items.get(k)?.g.key === target)) return;  // dropped where they are
+    if (isHome(target, ks)) return;  // dropped where they are
     ui.selected.clear();
     send("move", { items: keysOf(ks), target });
   };
@@ -571,7 +580,7 @@ export default function (component) {
   q(".move-btn").onclick = () => {
     const ks = [...ui.selected];
     const target = q(".move-to").value;
-    if (!ks.length || !target) return;
+    if (!ks.length || !target || isHome(target, ks)) return;
     ui.selected.clear();
     send("move", { items: keysOf(ks), target });
   };
@@ -654,6 +663,9 @@ def show(
         return
     _mount()(
         key=key,
-        data=component_data(person_id, name, groups, check.running_cents),
+        data=component_data(
+            person_id, name, groups, check.running_cents,
+            last_event=st.session_state.get(f"_{key}_last_event"),
+        ),
         on_edit_change=_edit_callback(conn, person_id, months, key),
     )

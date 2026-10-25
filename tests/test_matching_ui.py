@@ -128,6 +128,8 @@ def test_equation_and_component_data(conn, house):
     running = matching.running_balance_cents(conn, h["ann"])
     data = mu.component_data(h["ann"], "Ann", groups, running)
     assert data["person"] == h["ann"] and data["running"] == "$0.00"
+    assert data["last_event"] is None
+    assert mu.component_data(h["ann"], "Ann", groups, running, last_event="e1")["last_event"] == "e1"
     assert data["equation"] == {
         "terms": [], "balanced": 2, "total": "$0.00", "total_tone": "balanced",
         "running": "$0.00", "ok": True,
@@ -238,6 +240,10 @@ def test_refusals_are_reported(conn, house):
     assert msg == "Only a kept group can go back to being a suggestion. Nothing was saved."
     msg = mu.apply_edit(conn, h["ann"], None, _event(person=h["ann"], action="frobnicate"))
     assert msg == "Unknown edit 'frobnicate'; nothing was saved."
+    ev = _event(person=h["ann"], action="move", items=[[h["dep_03"], "paid"]],
+                target=_groups(conn, h)[1].key)
+    msg = mu.apply_edit(conn, h["ann"], None, ev)
+    assert msg == "Those items are already in that group. Nothing was saved."
     assert conn.execute("SELECT COUNT(*) FROM match_groups").fetchone()[0] == 0
 
 

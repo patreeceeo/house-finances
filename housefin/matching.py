@@ -538,6 +538,8 @@ def move(
                 f"Item(s) {missing} are no longer shown; reload the page and try again."
             )
         target = None if target_key == NEW else _find(groups, target_key)
+        if target is not None and all(owner[k].key == target.key for k in keys):
+            raise ValueError("Those items are already in that group.")
         sources = {owner[k].key: owner[k] for k in keys}
         if target is not None:
             sources.pop(target.key, None)

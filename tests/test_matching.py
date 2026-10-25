@@ -429,6 +429,26 @@ def test_move_to_new_group_and_empty_group_deleted(conn, three_months):
     assert kshape(groups)[0] == (True, ("2026-01",), 1000, 1000)
 
 
+def test_move_into_own_group_is_refused(conn, three_months):
+    h, ids = three_months
+    jan = ann_groups(conn, h)[0]
+    # A suggestion stays a suggestion: nothing is kept.
+    with pytest.raises(ValueError, match="already in that group"):
+        matching.move(conn, h["ann"], None, [(ids["rent_jan"], "share")], jan.key)
+    assert stored_groups(conn) == 0
+    gid = matching.keep(conn, h["ann"], None, jan.key)
+    with pytest.raises(ValueError, match="already in that group"):
+        matching.move(
+            conn, h["ann"], None,
+            [(ids["rent_jan"], "share"), (ids["dep_jan"], "paid")], f"k:{gid}",
+        )
+    # Some items from elsewhere still move in.
+    matching.move(
+        conn, h["ann"], None, [(ids["rent_jan"], "share"), (ids["dep_feb"], "paid")], f"k:{gid}"
+    )
+    assert (ids["dep_feb"], "paid") in [i.key for i in ann_groups(conn, h)[0].items]
+
+
 def test_move_refuses_stale_items(conn, three_months):
     h, ids = three_months
     key = ann_groups(conn, h)[0].key
