@@ -2,6 +2,7 @@
 
 import csv
 import io
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -207,3 +208,89 @@ def test_reports_page(monkeypatch, tmp_path):
     at.toggle(key="report_include_uncat").set_value(False).run()
     assert not at.exception, at.exception
     assert not any(e.label.startswith(reports.UNCATEGORIZED) for e in at.expander)
+
+
+# --- monthly average by purpose ----------------------------------------------
+
+
+def test_period_months(conn):
+    # All: first to last month in the data, gaps included.
+    assert reports.period_months(conn, None) == ["2026-09", "2026-10"]
+    _txn(conn, 90, -100, "2026-06-01")
+    assert reports.period_months(conn, None) == ["2026-06", "2026-07", "2026-08", "2026-09",
+                                                 "2026-10"]
+    assert reports.period_months(conn, ["2026-10", "2026-06"]) == ["2026-06", "2026-10"]
+    assert reports.period_months(db.connect(":memory:"), None) == []
+
+
+def test_next_month_rolls_over_the_year():
+    assert reports._next_month("2026-12") == "2027-01"
+    assert reports._next_month("2026-09") == "2026-10"
+
+
+def test_monthly_by_purpose(conn):
+    period, rows = reports.monthly_by_purpose(conn, None, ["Water", "Costco", "Rent"])
+    assert period == ["2026-09", "2026-10"]
+    got = {r.name: (r.by_month, r.total_cents, r.average_cents) for r in rows}
+    assert got == {
+        # Rent paid in Sep but applies to Oct; Sep counts as 0.
+        "Rent": ({"2026-09": 0, "2026-10": 300000}, 300000, 150000),
+        "Water": ({"2026-09": 5000, "2026-10": 60000}, 65000, 32500),
+        # Refund reduces Oct: 230.00 + 17.27 - 40.00.
+        "Costco": ({"2026-09": 0, "2026-10": 20727}, 20727, 10364),  # 103.635 -> 103.64
+        "Uncategorized": ({"2026-09": 0, "2026-10": 1200}, 1200, 600),
+    }
+    assert [r.name for r in rows] == ["Rent", "Water", "Costco", "Uncategorized"]
+    costco = next(r for r in rows if r.name == "Costco")
+    assert costco.average_is_rounded and costco.average == Fraction(20727, 2)
+    total = reports.monthly_total(rows, period)
+    assert total.by_month == {"2026-09": 5000, "2026-10": 381927}
+    assert total.total_cents == sum(r.total_cents for r in rows)
+
+
+def test_monthly_by_purpose_filters(conn):
+    period, rows = reports.monthly_by_purpose(conn, OCT, ["Water"], include_uncategorized=False)
+    assert period == OCT
+    assert [(r.name, r.by_month, r.average_cents) for r in rows] == [
+        ("Water", {"2026-10": 60000}, 60000)
+    ]
+    # Transfer is never a row, even if named.
+    _, rows = reports.monthly_by_purpose(conn, None, ["Transfer"], include_uncategorized=False)
+    assert rows == []
+
+
+def test_round_cents_halves_away_from_zero():
+    F = Fraction
+    assert [reports.round_cents(F(n, 2)) for n in (1, 3, -1, -3)] == [1, 2, -1, -2]
+    assert reports.round_cents(F(10, 3)) == 3 and reports.round_cents(F(-20, 3)) == -7
+
+
+def test_monthly_table_and_csv(conn):
+    period, rows = reports.monthly_by_purpose(conn, None, ["Costco"], include_uncategorized=False)
+    table = reports.monthly_table_rows(rows, period)
+    assert table == [{"Purpose": "Costco", "Sep 2026": 0.0, "Oct 2026": 207.27,
+                      "Total ($)": 207.27, "Average / month ($)": 103.64}]
+    assert reports.monthly_csv(rows, period) == (
+        "Purpose,2026-09,2026-10,Total,Average per month\n"
+        "Costco,0.00,207.27,207.27,103.64\n"
+    )
+
+
+def test_reports_page_monthly_average(monkeypatch, tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    path = tmp_path / "r.db"
+    c = db.connect(path)
+    _seed(c)
+    c.close()
+    monkeypatch.setenv("HOUSEFIN_DB", str(path))
+
+    at = AppTest.from_file(str(ROOT / "pages/5_Reports.py"), default_timeout=30).run()
+    at.radio(key="report_view").set_value(reports.MONTHLY_BY_PURPOSE).run()
+    assert not at.exception, at.exception
+    df = at.dataframe[0].value
+    assert list(df["Purpose"]) == ["Rent", "Water", "Costco", "Uncategorized", "Total"]
+    assert any("total ÷ 2 months" in c.value for c in at.caption)
+    at.multiselect(key="report_avg_purposes").set_value(["Water"]).run()
+    assert not at.exception, at.exception
+    assert list(at.dataframe[0].value["Purpose"]) == ["Water", "Uncategorized", "Total"]
