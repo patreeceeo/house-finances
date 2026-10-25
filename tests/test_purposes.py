@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, house_id, purpose_id
 
-from housefin import db, purposes, splits
+from housefin import db, purposes, rent, splits
 from housefin.purposes import PurposeError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,7 +42,7 @@ def test_add_and_name_validation(conn):
 
 
 def test_rename(conn):
-    pid = db.get_purpose_id(conn, "Other")
+    pid = purpose_id(conn, "Other")
     purposes.rename(conn, pid, "Misc")
     assert db.get_purpose(conn, "Misc")["id"] == pid
     purposes.rename(conn, pid, "misc")  # case change of itself is fine
@@ -53,14 +53,14 @@ def test_rename(conn):
 
 
 def test_transfer_is_protected(conn):
-    tid = db.get_transfer_purpose_id(conn)
+    tid = purpose_id(conn, "Transfer")
     with pytest.raises(PurposeError, match="renamed"):
         purposes.rename(conn, tid, "Moves")
     with pytest.raises(PurposeError, match="deleted"):
         purposes.delete(conn, tid)
     with pytest.raises(PurposeError, match="no split"):
-        purposes.save_default_split(conn, tid, {db.get_house_id(conn): 1})
-    assert db.get_transfer_purpose_id(conn) == tid
+        purposes.save_default_split(conn, tid, {house_id(conn): 1})
+    assert purpose_id(conn, "Transfer") == tid
     row = next(p for p in purposes.list_with_usage(conn) if p["id"] == tid)
     assert row["protected"] and not row["deletable"]
 
@@ -75,7 +75,7 @@ def test_delete_unused_removes_default_split(conn):
 
 
 def test_delete_refused_when_used_by_transactions(conn):
-    pid = db.get_purpose_id(conn, "Water")
+    pid = purpose_id(conn, "Water")
     add_resident(conn, "Alice")
     t = _txn(conn, pid)
     splits.apply_default_split(conn, [t])
@@ -86,7 +86,7 @@ def test_delete_refused_when_used_by_transactions(conn):
 
 
 def test_delete_refused_when_used_by_rule(conn):
-    pid = db.get_purpose_id(conn, "Costco")
+    pid = purpose_id(conn, "Costco")
     with conn:
         conn.execute(
             "INSERT INTO rules (pattern, applies_to, purpose_id) VALUES ('COSTCO', 'withdrawal', ?)",
@@ -108,24 +108,18 @@ def test_describe_usage():
 # --- default splits ----------------------------------------------------------------
 
 
-def test_percentages():
-    assert purposes.percentages({1: 35, 2: 35, 3: 30}) == {1: 35.0, 2: 35.0, 3: 30.0}
-    assert purposes.percentages({1: 1, 2: 0}) == {1: 100.0, 2: 0.0}
-    assert purposes.percentages({1: 0}) == {1: 0.0}
-
-
 def test_candidates_are_active_people_plus_house(conn):
     a = add_resident(conn, "Alice")
     add_resident(conn, "Gone", end="2026-01")
     add_resident(conn, "Later", "2027-01")
     ids = [p["id"] for p in purposes.split_candidates(conn, "2026-10")]
-    assert ids == [db.get_house_id(conn), a]
+    assert ids == [house_id(conn), a]
     assert [p["id"] for p in purposes.even_split_people(conn, "2026-10")] == [a]
 
 
 def test_save_default_split_keeps_inactive_and_drops_zeros(conn):
-    pid = db.get_purpose_id(conn, "Water")
-    house = db.get_house_id(conn)
+    pid = purpose_id(conn, "Water")
+    house = house_id(conn)
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
     gone = add_resident(conn, "Gone", end="2026-03")
@@ -139,7 +133,7 @@ def test_save_default_split_keeps_inactive_and_drops_zeros(conn):
 
 
 def test_default_edit_only_affects_future_withdrawals(conn):
-    pid = db.get_purpose_id(conn, "Internet")  # Rent splits by rooms
+    pid = purpose_id(conn, "Internet")  # Rent splits by rooms
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
     old = _txn(conn, pid, -400000)
@@ -157,21 +151,21 @@ def test_default_edit_only_affects_future_withdrawals(conn):
 
 
 def test_split_by_rooms_purpose_has_no_default_split(conn):
-    rent = db.get_purpose_id(conn, "Rent")
+    rent_id = purpose_id(conn, "Rent")
     a = add_resident(conn, "Alice")
     with pytest.raises(PurposeError, match="split by rooms.*Rooms page"):
-        purposes.save_default_split(conn, rent, {a: 100})
+        purposes.save_default_split(conn, rent_id, {a: 100})
     with pytest.raises(PurposeError, match="split by rooms"):
-        purposes.clear_default_split(conn, rent)
-    assert splits.get_purpose_split(conn, rent) == []
-    row = next(p for p in purposes.list_with_usage(conn) if p["id"] == rent)
+        purposes.clear_default_split(conn, rent_id)
+    assert splits.get_purpose_split(conn, rent_id) == []
+    row = next(p for p in purposes.list_with_usage(conn) if p["id"] == rent_id)
     assert row["split_by_rooms"] and not row["deletable"]
     # Renaming is fine (the flag, not the name, marks it); deleting is refused.
-    purposes.rename(conn, rent, "House rent")
-    assert splits.is_split_by_rooms(conn, rent)
+    purposes.rename(conn, rent_id, "House rent")
+    assert rent.is_split_by_rooms(conn, rent_id)
     with pytest.raises(PurposeError, match="split by rooms and cannot be deleted"):
-        purposes.delete(conn, rent)
-    assert not any(p["split_by_rooms"] for p in purposes.list_with_usage(conn) if p["id"] != rent)
+        purposes.delete(conn, rent_id)
+    assert not any(p["split_by_rooms"] for p in purposes.list_with_usage(conn) if p["id"] != rent_id)
 
 
 # --- page (AppTest) ----------------------------------------------------------------
@@ -206,10 +200,10 @@ def test_page_renders(app_db):
     # Rent shows "Split by rooms" and a pointer to the Rooms page, no editor.
     assert any("Rooms page" in i.value and "vacant" in i.value for i in at.info)
     c = db.connect(app_db)
-    rent = db.get_purpose_id(c, "Rent")
+    rent_id = purpose_id(c, "Rent")
     c.close()
-    assert not [n for n in at.number_input if n.key.startswith(f"purpose_w_{rent}_")]
-    assert at.button(key=f"purpose_delete_{rent}").disabled
+    assert not [n for n in at.number_input if n.key.startswith(f"purpose_w_{rent_id}_")]
+    assert at.button(key=f"purpose_delete_{rent_id}").disabled
     # Only active people and the House are offered: 3 weight inputs per
     # purpose with a default split (all but Rent and Transfer).
     assert len(at.number_input) == 3 * 7
@@ -226,7 +220,7 @@ def test_page_add_rename_and_split(app_db):
     assert any("Added Gas" in s.value for s in at.success)
 
     c = db.connect(app_db)
-    gas = db.get_purpose_id(c, "Gas")
+    gas = purpose_id(c, "Gas")
     alice = db.get_person_by_name(c, "Alice")["id"]
     bob = db.get_person_by_name(c, "Bob")["id"]
 
@@ -257,10 +251,10 @@ def test_page_add_rename_and_split(app_db):
 
 def test_page_split_percents_are_exact(app_db):
     c = db.connect(app_db)
-    internet, water = db.get_purpose_id(c, "Internet"), db.get_purpose_id(c, "Water")
+    internet, water = purpose_id(c, "Internet"), purpose_id(c, "Water")
     alice = db.get_person_by_name(c, "Alice")["id"]
     bob = db.get_person_by_name(c, "Bob")["id"]
-    house = db.get_house_id(c)
+    house = house_id(c)
     splits.set_purpose_split(c, water, [(alice, 1), (bob, 1), (house, 1)])
     at = _app()
 
@@ -281,7 +275,7 @@ def test_page_split_percents_are_exact(app_db):
 
 def test_page_refuses_duplicate_and_disables_delete_when_used(app_db):
     c = db.connect(app_db)
-    water = db.get_purpose_id(c, "Water")
+    water = purpose_id(c, "Water")
     _txn(c, water)
     c.close()
     at = _app()

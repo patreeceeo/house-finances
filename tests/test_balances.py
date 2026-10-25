@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, house_id, purpose_id
 
 from housefin import balances, db, splits
 
@@ -46,12 +46,31 @@ def house(conn):
         "ann": add_resident(conn, "Ann"),
         "bob": add_resident(conn, "Bob"),
         "cy": add_resident(conn, "Cy", end="2026-01"),
-        "house": db.get_house_id(conn),
-        "rent": db.get_purpose_id(conn, "Rent"),
-        "costco": db.get_purpose_id(conn, "Costco"),
-        "transfer": db.get_transfer_purpose_id(conn),
+        "house": house_id(conn),
+        "rent": purpose_id(conn, "Rent"),
+        "costco": purpose_id(conn, "Costco"),
+        "transfer": purpose_id(conn, "Transfer"),
     }
     return ids
+
+
+def test_share_totals(conn, house):
+    h = house
+    internet = purpose_id(conn, "Internet")
+    ab = [(h["ann"], 1), (h["bob"], 1)]
+    tx(conn, "2026-09-03", -1000, purpose=internet, weights=ab)
+    tx(conn, "2026-10-03", -2000, purpose=internet, weights=ab)
+    tx(conn, "2026-10-31", -4000, purpose=internet, weights=ab, applies_month="2026-11")
+    tx(conn, "2026-10-10", 600, purpose=internet, weights=ab)  # refund
+    t_tr = tx(conn, "2026-10-05", -9999, purpose=h["transfer"])
+    with conn:  # even if a Transfer somehow has split rows, totals ignore it
+        conn.execute("INSERT INTO splits VALUES (?, ?, 1, 9999)", (t_tr, h["ann"]))
+    a, b = h["ann"], h["bob"]
+    assert balances.share_totals(conn) == {a: 3200, b: 3200}
+    assert balances.share_totals(conn, ["2026-10"]) == {a: 700, b: 700}
+    assert balances.share_totals(conn, ["2026-09", "2026-11"]) == {a: 2500, b: 2500}
+    assert balances.share_totals(conn, through="2026-10") == {a: 1200, b: 1200}
+    assert balances.share_totals(conn, []) == {a: 3200, b: 3200}  # no months = all time
 
 
 def by_name(rows):
@@ -174,7 +193,7 @@ def test_house_share_absorbed(conn, house):
 def test_payout_to_housemate(conn, house):
     h = house
     tx(conn, "2026-01-01", 5000, person=h["bob"])
-    tx(conn, "2026-01-02", -5000, purpose=db.get_purpose_id(conn, "Other"),
+    tx(conn, "2026-01-02", -5000, purpose=purpose_id(conn, "Other"),
        weights=[(h["bob"], 1)])
     assert by_name(balances.balances(conn))["Bob"].running_cents == 0
 
@@ -243,7 +262,7 @@ def app_db(monkeypatch, tmp_path):
     c = db.connect(path)
     ann = add_resident(c, "Ann")
     cy = add_resident(c, "Cy", end="2026-01")
-    rent = db.get_purpose_id(c, "Rent")
+    rent = purpose_id(c, "Rent")
     tx(c, "2026-01-01", -2000, purpose=rent, weights=[(ann, 1), (cy, 1)])
     tx(c, "2026-01-02", 500, person=ann)
     tx(c, "2026-02-01", -123)  # uncategorized
@@ -267,7 +286,7 @@ def test_page_warning_names_rent_waiting_for_vacant_share(app_db):
     from streamlit.testing.v1 import AppTest
 
     c = db.connect(app_db)
-    tx(c, "2026-02-03", -150000, purpose=db.get_purpose_id(c, "Rent"))  # no split yet
+    tx(c, "2026-02-03", -150000, purpose=purpose_id(c, "Rent"))  # no split yet
     c.close()
     at = AppTest.from_file(str(ROOT / "pages/6_Balances.py"), default_timeout=30).run()
     assert not at.exception, at.exception

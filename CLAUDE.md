@@ -71,10 +71,26 @@ The app's data lives in `finances.db` (SQLite, gitignored) in the project root;
 `housefin.db.connect()` creates and migrates it on first use. Tests use
 in-memory or temp-dir databases only.
 
-## Architecture Overview
+## Architecture
 
-_Add a brief overview of your project architecture_
+README.md explains how the money works (signs, tags, months, splits, rent by
+rooms, balances) and maps the code. Domain logic lives in `housefin/` with no
+Streamlit dependency, so it can be tested directly; `pages/` are the
+Streamlit screens, and `*_ui.py` modules hold helpers for one page. Only
+`ui.py`, `matching_ui.py` and `fmt.browser_locale` import Streamlit, inside
+the functions that need it.
 
-## Conventions & Patterns
+## Conventions
 
-_Add your project-specific conventions here_
+- Money is integer cents. Transaction amounts carry the bank's sign; shares
+  carry the person's (see `housefin/splits.py`).
+- Calculations are transparent and decisions are made by people: never
+  rescale a split, round an entered value or fill in a vacancy silently.
+  Surface it and let the user confirm.
+- Months and dates shown to people go through `housefin.fmt`, which follows
+  the browser's locale. Month arithmetic and month SQL live in
+  `housefin.dates`.
+- Group writes with `db.transaction`. Change the schema by appending to
+  `db.MIGRATIONS`; never edit an existing migration.
+- Tests use in-memory or temp-dir databases; shared helpers are in
+  `tests/helpers.py`.

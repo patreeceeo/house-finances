@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import categorize as cat
 from housefin import db, rules, splits
@@ -122,7 +122,7 @@ def test_save_person_manual_and_remember(data):
 
 def test_save_withdrawal_default_split_and_remember(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     res = cat.save_withdrawal(conn, tx["rent"], rent, remember=False)
     assert res.rule_id is None
     # even split among people active in Feb (Cara moved out), House excluded
@@ -132,7 +132,7 @@ def test_save_withdrawal_default_split_and_remember(data):
 
 def test_save_withdrawal_custom_split_remembered_for_rule_tagged(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     weights = [(people["Alice"], 60), (people["Bob"], 40), (people["Cara"], 0)]
     res = cat.save_withdrawal(
         conn, tx["rent"], rent, weights, remember_split=True, remember=True
@@ -140,21 +140,21 @@ def test_save_withdrawal_custom_split_remembered_for_rule_tagged(data):
     assert split_of(conn, tx["rent"]) == {people["Alice"]: (60, 180000), people["Bob"]: (40, 120000)}
     assert splits.get_purpose_split(conn, rent) == [(people["Alice"], 60), (people["Bob"], 40)]
     # the rule tagged the January rent and it got the just-remembered default
-    assert res.rule_tagged == 1 and res.rule_tagged_ids == [tx["rent_old"]]
+    assert res.rule_tagged == 1
     assert tuple(tags(conn, tx["rent_old"]))[:3] == (None, rent, "rule")
     assert split_of(conn, tx["rent_old"]) == {people["Alice"]: (60, 180000), people["Bob"]: (40, 120000)}
 
 
 def test_split_not_remembered_by_default(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     cat.save_withdrawal(conn, tx["rent"], rent, [(people["Alice"], 1)])
     assert splits.get_purpose_split(conn, rent) == []
 
 
 def test_contains_rule_from_shortened_pattern(data):
     conn, people, tx = data
-    internet = db.get_purpose_id(conn, "Internet")
+    internet = purpose_id(conn, "Internet")
     prev = cat.preview_rule(conn, tx["net1"], "comcast / xfinity")
     assert prev.match_type == rules.CONTAINS and prev.total == 2 and prev.will_tag == 1
     full = cat.preview_rule(conn, tx["net1"], "COMCAST / XFINITY 1234")
@@ -166,7 +166,7 @@ def test_contains_rule_from_shortened_pattern(data):
 
 def test_refund_negative_shares_and_rule(data):
     conn, people, tx = data
-    other = db.get_purpose_id(conn, "Other")
+    other = purpose_id(conn, "Other")
     cat.save_refund(conn, tx["refund"], other, [(people["Alice"], 1), (people["Bob"], 1)], remember=True)
     assert tuple(tags(conn, tx["refund"]))[:3] == (None, other, "manual")
     assert split_of(conn, tx["refund"]) == {people["Alice"]: (1, -1250), people["Bob"]: (1, -1250)}
@@ -179,10 +179,10 @@ def test_refund_negative_shares_and_rule(data):
 
 def test_transfer_has_no_split(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     cat.save_withdrawal(conn, tx["rent"], rent)
     assert split_of(conn, tx["rent"])
-    cat.save_withdrawal(conn, tx["rent"], db.get_transfer_purpose_id(conn), [(people["Alice"], 1)])
+    cat.save_withdrawal(conn, tx["rent"], purpose_id(conn, "Transfer"), [(people["Alice"], 1)])
     assert split_of(conn, tx["rent"]) == {}
 
 
@@ -190,19 +190,19 @@ def test_remember_allowed_for_venmo(data):
     conn, people, tx = data
     cat.save_person(conn, tx["venmo"], people["Alice"], remember=True)
     assert tags(conn, tx["venmo"])["category_source"] == "manual"
-    assert rules.find_best_rule(conn, "VENMO CASHOUT 555", 5000) is not None
+    assert rules.best_rule(rules.all_rules(conn), "VENMO CASHOUT 555", 5000) is not None
 
 
 def test_withdrawal_to_person(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     cat.save_withdrawal(conn, tx["rent"], rent)
     assert split_of(conn, tx["rent"])
     result = cat.save_person(conn, tx["rent"], people["Bob"], remember=True)
     assert tuple(tags(conn, tx["rent"]))[:3] == (people["Bob"], None, "manual")
     assert split_of(conn, tx["rent"]) == {}
     # The rule is a withdrawal rule and tags the matching uncategorized withdrawal.
-    assert result.rule_tagged_ids == [tx["rent_old"]]
+    assert result.rule_tagged == 1
     assert tuple(tags(conn, tx["rent_old"]))[:3] == (people["Bob"], None, "rule")
 
 
@@ -211,20 +211,20 @@ def test_validation(data):
     with pytest.raises(ValueError):
         cat.save_person(conn, tx["rent"], 9999)
     with pytest.raises(ValueError):
-        cat.save_withdrawal(conn, tx["zelle"], db.get_purpose_id(conn, "Water"))
+        cat.save_withdrawal(conn, tx["zelle"], purpose_id(conn, "Water"))
     with pytest.raises(ValueError):
-        cat.save_refund(conn, tx["rent"], db.get_purpose_id(conn, "Water"))
+        cat.save_refund(conn, tx["rent"], purpose_id(conn, "Water"))
     with pytest.raises(ValueError):
         cat.save_withdrawal(conn, tx["rent"], 9999)
 
 
 def test_manual_tags_survive_rule_changes(data):
     conn, people, tx = data
-    rent, other = db.get_purpose_id(conn, "Water"), db.get_purpose_id(conn, "Other")
+    rent, other = purpose_id(conn, "Water"), purpose_id(conn, "Other")
     cat.save_withdrawal(conn, tx["rent"], rent, remember=True)
     rule_id = rules.all_rules(conn)[-1].id
     cat.save_withdrawal(conn, tx["rent_old"], other)  # manual override
-    rules.update_rule(conn, rule_id, purpose_id=db.get_purpose_id(conn, "Water"), reapply=True)
+    rules.update_rule(conn, rule_id, purpose_id=purpose_id(conn, "Water"), reapply=True)
     assert tags(conn, tx["rent"])["purpose_id"] == rent
     assert tags(conn, tx["rent_old"])["purpose_id"] == other
     rules.apply_rules(conn, [tx["rent"], tx["rent_old"]])
@@ -233,7 +233,7 @@ def test_manual_tags_survive_rule_changes(data):
 
 def test_applies_month_drives_default_split(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     # Feb rent counted toward January, when Cara was still in
     cat.save_withdrawal(conn, tx["rent"], rent, applies_month="2026-01")
     assert tags(conn, tx["rent"])["applies_month"] == "2026-01"
@@ -242,7 +242,7 @@ def test_applies_month_drives_default_split(data):
 
 def test_clear_tags(data):
     conn, people, tx = data
-    cat.save_withdrawal(conn, tx["rent"], db.get_purpose_id(conn, "Water"), applies_month="2026-03")
+    cat.save_withdrawal(conn, tx["rent"], purpose_id(conn, "Water"), applies_month="2026-03")
     cat.clear_tags(conn, tx["rent"])
     assert tuple(tags(conn, tx["rent"])) == (None, None, None, "2026-03")
     assert split_of(conn, tx["rent"]) == {}
@@ -250,7 +250,7 @@ def test_clear_tags(data):
 
 def test_split_editor_helpers(data):
     conn, people, tx = data
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     feb = [p["name"] for p in cat.split_candidates(conn, "2026-02")]
     assert feb == ["Alice", "Bob", "House"]
     with_cara = [p["name"] for p in cat.split_candidates(conn, "2026-02", [(people["Cara"], 1)])]
@@ -261,7 +261,7 @@ def test_split_editor_helpers(data):
     cat.save_withdrawal(conn, tx["rent"], rent, [(people["Alice"], 3), (people["Bob"], 1)])
     txn = cat.get_transaction(conn, tx["rent"])
     assert dict(cat.initial_weights(conn, txn, rent)) == {people["Alice"]: 3, people["Bob"]: 1}
-    other = db.get_purpose_id(conn, "Other")
+    other = purpose_id(conn, "Other")
     assert cat.initial_weights(conn, txn, other) == [(people["Alice"], 1.0), (people["Bob"], 1.0)]
 
 
@@ -298,7 +298,7 @@ def test_page_withdrawal_with_split_and_remember(app_db):
     select_row(at, tx["rent"])
     k = f"cat_{tx['rent']}"
     conn = db.connect(path)
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     at.selectbox(key=f"{k}_purpose").set_value(rent).run()
     # even split shown; edit it
     assert at.number_input(key=f"{k}_w_{rent}_2026-02_{people['Alice']}").value == 50.0
@@ -327,7 +327,7 @@ def test_page_split_percents_are_exact(app_db):
     path, people, tx = app_db
     at = run_page()
     conn = db.connect(path)
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     A, B, C = people["Alice"], people["Bob"], people["Cara"]
 
     # An even three-way split is shown rounded but saved as exact thirds.
@@ -398,7 +398,7 @@ def test_page_new_purpose_inline_and_filters(app_db):
     at.button(key=f"{k}_save").click().run()
     assert not at.exception, at.exception
     conn = db.connect(path)
-    pid = db.get_purpose_id(conn, "Streaming")
+    pid = purpose_id(conn, "Streaming")
     assert tags(conn, tx["net1"])["purpose_id"] == pid
     assert set(split_of(conn, tx["net1"])) == {people["Alice"], people["Bob"]}
     assert tags(conn, tx["net2"])["purpose_id"] is None  # not remembered
@@ -416,7 +416,7 @@ def test_page_refund_toggle(app_db):
     k = f"cat_{tx['refund']}"
     at.toggle(key=f"{k}_refund").set_value(True).run()
     conn = db.connect(path)
-    other = db.get_purpose_id(conn, "Other")
+    other = purpose_id(conn, "Other")
     at.selectbox(key=f"{k}_purpose").set_value(other).run()
     at.checkbox(key=f"{k}_remember").uncheck().run()
     at.button(key=f"{k}_save").click().run()

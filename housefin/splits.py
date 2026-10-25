@@ -17,8 +17,7 @@ The House may appear in a split; its share is stored like anyone else's and
 consumers (Balances) simply ignore the House row. Purposes with
 ``excluded = 1`` (the built-in Transfer) never get a split.
 
-A transaction's month is ``applies_month`` if set, otherwise the month of its
-``date`` (see :data:`TXN_MONTH_SQL`).
+A transaction's month is its effective month (:func:`dates.month_of`).
 
 Where a split came from is kept in ``transactions.split_source``:
 ``'default'`` (written from the purpose's default split by
@@ -28,7 +27,7 @@ writes or removes split rows keeps it in step; other modules remove a split
 with :func:`clear_split`. Rows saved before the column existed with split rows
 but no source (only possible from raw SQL) are treated as manual.
 
-A purpose default can name people who are not active in a transaction's
+A purpose default can name people who are not in the house in a transaction's
 month. They are left out of that transaction's default split, which scales
 everyone else's share up to cover the whole amount. That is the app's guess,
 not a person's decision, so who was left out (and with what weight) is kept
@@ -36,8 +35,8 @@ in ``split_left_out`` and the split is *pending review* until someone
 confirms it (:func:`confirm_split`) or saves a split in an editor.
 
 Rent (the purpose with ``split_by_rooms``) is split by who slept in which room
-that month instead (:func:`room_split`). A month with a vacant room gets no
-split at all: the payment waits for review (:data:`ROOM_REVIEW_SQL`) until a
+that month instead (:func:`rent.room_split`). A month with a vacant room gets no
+split at all: the payment waits for review (:data:`rent.NEEDS_REVIEW_SQL`) until a
 person says who covers the vacant share. Nobody is scaled up to cover it.
 """
 
@@ -45,19 +44,16 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 from fractions import Fraction
 
-from housefin import db
+from housefin import dates, db
 
 Weights = Sequence[tuple[int, float]]
 
 DEFAULT = "default"
 MANUAL = "manual"
 
-# SQL expression for a transaction's effective month; use with alias ``t``.
-TXN_MONTH_SQL = "COALESCE(t.applies_month, substr(t.date, 1, 7))"
 
 
 # --- pure computation ----------------------------------------------------------
@@ -167,10 +163,6 @@ def same_split(a: Weights, b: Weights) -> bool:
     return ratios(a) == ratios(b)
 
 
-def transaction_month(row: sqlite3.Row | dict) -> str:
-    """Effective 'YYYY-MM' of a transactions row."""
-    return row["applies_month"] or row["date"][:7]
-
 
 # --- purpose default splits ------------------------------------------------------
 
@@ -217,39 +209,41 @@ def default_split_detail(
 ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
     """``(weights, left_out)``: the split a new transaction with this purpose
     in ``month`` starts from, and the members of the purpose default who are
-    not in it because they are not active that month (with their weights).
+    not in it because they are not in the house that month (with their weights).
 
     * Excluded purposes (Transfer) -> ``([], [])`` (no split).
-    * The purpose's remembered default, minus anyone not active in ``month``
-      (others keep their weights; the House is always active). A non-empty
+    * The purpose's remembered default, minus anyone not in the house in ``month``
+      (others keep their weights; the House always counts as in). A non-empty
       ``left_out`` means the others' shares are scaled up to cover the whole
       amount, which needs a person to confirm it.
-    * If there is no default, or nobody in it is active: an even split
-      (weight 1 each) among people active that month, House excluded.
-    * ``[]`` weights if nobody is active at all.
+    * If there is no default, or nobody in it is in the house: an even split
+      (weight 1 each) among people in the house that month, House excluded.
+    * ``[]`` weights if nobody is in the house at all.
     * Purposes split by rooms (Rent): the room split for ``month``
-      (:func:`room_split`) when every room was occupied every night and the
+      (:func:`rent.room_split`) when every room was occupied every night and the
       room percents are valid; otherwise ``([], [])``: no split, and the
-      payment waits for review (:data:`ROOM_REVIEW_SQL`). Nobody's share is
+      payment waits for review (:data:`rent.NEEDS_REVIEW_SQL`). Nobody's share is
       ever scaled up to cover a vacancy.
     """
     if _is_excluded(conn, purpose_id):
         return [], []
-    if is_split_by_rooms(conn, purpose_id):
-        rs = room_split(conn, month, 0)
+    from housefin import rent  # rent imports this module
+
+    if rent.is_split_by_rooms(conn, purpose_id):
+        rs = rent.room_split(conn, month, 0)
         return (rs.weights() if rs.fully_occupied else []), []
     people = {p["id"]: p for p in db.list_people(conn)}
     default, left_out = [], []
     for pid, w in get_purpose_split(conn, purpose_id):
         if pid not in people:
             continue
-        if people[pid]["is_house"] or db.is_active(conn, people[pid], month):
+        if people[pid]["is_house"] or db.in_house(conn, people[pid], month):
             default.append((pid, w))
         else:
             left_out.append((pid, w))
     if default:
         return default, left_out
-    return [(p["id"], 1.0) for p in db.active_people(conn, month)], left_out
+    return [(p["id"], 1.0) for p in db.people_in_house(conn, month)], left_out
 
 
 def default_split_for(
@@ -257,212 +251,6 @@ def default_split_for(
 ) -> list[tuple[int, float]]:
     """The weights of :func:`default_split_detail`."""
     return default_split_detail(conn, purpose_id, month)[0]
-
-
-# --- room split (rent) -------------------------------------------------------------
-#
-# docs/rooms-spec.md, "How a rent payment is split". For a purpose with
-# ``split_by_rooms`` (Rent), each person's weight is the sum over the rooms
-# they slept in that month of room percent x nights; each vacant span weighs
-# room percent x vacant nights. All weights total 100 x days in the month.
-# A fully occupied month is written as a default split; any vacancy (or room
-# percents that don't total exactly 100%) leaves the payment with no split,
-# waiting for a person to say who covers the vacant share.
-
-# True for a transaction (alias ``t``) that is a rent payment with no split
-# yet: its month had a vacancy (or unusable room percents) when it was tagged.
-ROOM_REVIEW_SQL = (
-    "(EXISTS (SELECT 1 FROM purposes rp WHERE rp.id = t.purpose_id"
-    " AND rp.split_by_rooms = 1 AND rp.excluded = 0)"
-    " AND NOT EXISTS (SELECT 1 FROM splits rs WHERE rs.transaction_id = t.id))"
-)
-
-_VACANT_ID = -1  # stand-in id for the vacant share in compute_shares
-
-
-def is_split_by_rooms(conn: sqlite3.Connection, purpose_id: int | None) -> bool:
-    """Whether a purpose's split comes from room assignments (Rent)."""
-    if purpose_id is None:
-        return False
-    row = conn.execute(
-        "SELECT split_by_rooms FROM purposes WHERE id = ?", (purpose_id,)
-    ).fetchone()
-    return row is not None and bool(row["split_by_rooms"])
-
-
-@dataclass
-class RoomSplitPerson:
-    """One person's line in a rent split: the room(s) they slept in that
-    month, nights, weight (exact) and share in cents."""
-
-    person_id: int
-    name: str
-    room: str  # room name; several joined with ", " if they moved rooms
-    nights: int
-    weight: Decimal
-    share_cents: int
-
-
-@dataclass
-class RoomSplitVacancy:
-    """One vacant span of a room: nights ``first``..``last`` (inclusive)."""
-
-    room_id: int
-    room: str
-    first: str  # 'YYYY-MM-DD'
-    last: str
-    nights: int
-    weight: Decimal
-    amount_cents: int
-
-
-@dataclass
-class RoomSplit:
-    """A rent amount split by rooms for one month (see :func:`room_split`).
-
-    ``amount_cents`` and every share carry the sign they were given (pass
-    ``-transaction.amount_cents`` for shares as stored; see the module
-    docstring). With ``error`` set (room percents unusable) there are no rows.
-    """
-
-    month: str
-    days_in_month: int
-    amount_cents: int
-    total_weight: Decimal  # 100 x days in month
-    people: list[RoomSplitPerson] = field(default_factory=list)
-    vacant: list[RoomSplitVacancy] = field(default_factory=list)
-    error: str | None = None
-
-    @property
-    def vacant_weight(self) -> Decimal:
-        return sum((v.weight for v in self.vacant), Decimal(0))
-
-    @property
-    def vacant_cents(self) -> int:
-        return sum(v.amount_cents for v in self.vacant)
-
-    @property
-    def people_cents(self) -> int:
-        return sum(p.share_cents for p in self.people)
-
-    @property
-    def fully_occupied(self) -> bool:
-        """True when this split can be written as is: valid percents, nobody
-        missing on any night."""
-        return self.error is None and bool(self.people) and not self.vacant
-
-    def weights(self) -> list[tuple[int, float]]:
-        """``[(person_id, weight)]`` for storing (floats of exact decimals)."""
-        return [(p.person_id, float(p.weight)) for p in self.people]
-
-    def warnings(self) -> list[str]:
-        """User-facing reasons this split can't be written as is, e.g.
-        'Attic vacant 11–31 Jul (420 of 3,100)'."""
-        if self.error is not None:
-            return [f"Rent can't be split by rooms: {self.error}"]
-        out = [
-            f"{v.room} vacant {_span_text(v.first, v.last)}"
-            f" ({_weight_text(v.weight)} of {_weight_text(self.total_weight)})"
-            for v in self.vacant
-        ]
-        if not self.people and not self.vacant:
-            out.append("Nobody was in a room this month.")
-        return out
-
-
-def _weight_text(w: Decimal) -> str:
-    """'3,100', '1,034.625', '92.75'."""
-    text = format(w, ",f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
-
-
-def _span_text(first: str, last: str) -> str:
-    """'11–31 Jul', or '11 Jul' for a single night (spans never cross months),
-    in the browser's language."""
-    from housefin import ui
-
-    return ui.format_day_span(first, last)
-
-
-def room_split(
-    conn: sqlite3.Connection, month: str, amount_cents: int, *, rotate: int = 0
-) -> RoomSplit:
-    """Split ``amount_cents`` by who was in each room in ``month`` ('YYYY-MM').
-
-    Weights are exact decimals (room percent as entered x nights). Shares use
-    :func:`compute_shares` over the people *and* one entry for the whole
-    vacant share, so people's shares are exactly what they would be in the
-    final split whoever ends up covering the vacancy; the vacant share is then
-    divided over its spans the same way. Pass the transaction id as
-    ``rotate`` to match the split that gets stored. Nothing is written.
-    """
-    from housefin import rooms  # rooms imports this module
-
-    first, last = rooms.month_bounds(month)
-    days = rooms._nights(first, last)
-    total = Decimal(100) * days
-    error = rooms.percent_error(conn)
-    if error is not None:
-        return RoomSplit(month, days, amount_cents, total, error=error)
-
-    occ = rooms.month_occupancy(conn, month)
-    names = {p["id"]: p["name"] for p in db.list_people(conn)}
-    person: dict[int, list] = {}  # pid -> [room names, nights, weight]
-    vacant: list[RoomSplitVacancy] = []
-    for room in occ.rooms:
-        pct = Decimal(str(room.percent))
-        for pid, n in sorted(room.days.items()):
-            entry = person.setdefault(pid, [[], 0, Decimal(0)])
-            entry[0].append(room.name)
-            entry[1] += n
-            entry[2] += pct * n
-        for s, e in room.vacant:
-            n = rooms._nights(s, e)
-            vacant.append(RoomSplitVacancy(room.room_id, room.name, s, e, n, pct * n, 0))
-
-    weight_sum = sum((w for _, _, w in person.values()), Decimal(0))
-    weight_sum += sum((v.weight for v in vacant), Decimal(0))
-    if weight_sum != total:  # cannot happen with valid percents; never rescale
-        return RoomSplit(
-            month, days, amount_cents, total,
-            error=f"room weights total {_weight_text(weight_sum)}, not {_weight_text(total)}.",
-        )
-
-    entries = [(pid, w) for pid, (_, _, w) in person.items()]
-    vacant_weight = sum((v.weight for v in vacant), Decimal(0))
-    if vacant_weight:
-        entries.append((_VACANT_ID, vacant_weight))
-    shares = dict(compute_shares(amount_cents, entries, rotate=rotate)) if entries else {}
-    if vacant_weight:
-        by_span = compute_shares(
-            shares[_VACANT_ID], [(i, v.weight) for i, v in enumerate(vacant)], rotate=rotate
-        )
-        for i, cents in by_span:
-            vacant[i].amount_cents = cents
-
-    people = [
-        RoomSplitPerson(pid, names.get(pid, str(pid)), ", ".join(rs), n, w, shares[pid])
-        for pid, (rs, n, w) in person.items()
-    ]
-    people.sort(key=lambda p: (-p.weight, p.name))
-    return RoomSplit(month, days, amount_cents, total, people, vacant)
-
-
-def room_split_for_transaction(conn: sqlite3.Connection, txn_id: int) -> RoomSplit:
-    """:func:`room_split` of a transaction's amount for its month (applies-to
-    month if set, else its date's month), shares signed as stored
-    (``-amount_cents``) and rotated as :func:`apply_default_split` would.
-    For the Categorize rent editor and "Recalculate from rooms"."""
-    txn = _get_txn(conn, txn_id)
-    return room_split(conn, transaction_month(txn), -txn["amount_cents"], rotate=txn["id"])
-
-
-def needs_room_review(conn: sqlite3.Connection, txn_id: int) -> bool:
-    """Whether a transaction is a rent payment waiting for review (split by
-    rooms but no split stored: see :data:`ROOM_REVIEW_SQL`)."""
-    return conn.execute(
-        f"SELECT 1 FROM transactions t WHERE t.id = ? AND {ROOM_REVIEW_SQL}", (txn_id,)
-    ).fetchone() is not None
 
 
 # --- transaction splits ---------------------------------------------------------
@@ -587,7 +375,7 @@ def apply_default_split(
     or a split that came from a default) gets the purpose's current default,
     pending review if the default left anyone out (see the module docstring).
     Rent (``split_by_rooms``) gets its room split, or no split at all (waiting
-    for review, :data:`ROOM_REVIEW_SQL`) if a room was vacant that month.
+    for review, :data:`rent.NEEDS_REVIEW_SQL`) if a room was vacant that month.
 
     Not for re-applying an edited purpose default to past transactions:
     changing a default never changes existing splits, so don't pass ids whose
@@ -605,7 +393,7 @@ def apply_default_split(
             if not replace and _is_manual(conn, txn):
                 continue
             weights, left_out = default_split_detail(
-                conn, txn["purpose_id"], transaction_month(txn)
+                conn, txn["purpose_id"], dates.month_of(txn)
             )
             _write_split(conn, txn, weights, DEFAULT, left_out)
             if weights:
@@ -655,39 +443,3 @@ def sync_after_rules(conn: sqlite3.Connection, changed) -> int:
             conn, [i for i in ids if i not in no_purpose], replace=True
         )
 
-
-# --- reporting -------------------------------------------------------------------
-
-
-def share_totals(
-    conn: sqlite3.Connection,
-    months: Iterable[str] | None = None,
-    *,
-    through: str | None = None,
-) -> dict[int, int]:
-    """``{person_id: SUM(share_cents)}`` over split transactions.
-
-    ``months``: restrict to these effective months ('YYYY-MM'); None = all.
-    ``through``: only months <= this one (for running balances).
-    Excluded purposes (Transfer) are left out. The House is included; drop
-    ``db.get_house_id(conn)`` if you don't want it. Positive = owed (see the
-    module docstring).
-    """
-    sql = (
-        "SELECT s.person_id, SUM(s.share_cents) AS total FROM splits s"
-        " JOIN transactions t ON t.id = s.transaction_id"
-        " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
-        " WHERE COALESCE(pu.excluded, 0) = 0"
-    )
-    params: list = []
-    if months is not None:
-        months = list(months)
-        if not months:
-            return {}
-        sql += f" AND {TXN_MONTH_SQL} IN ({','.join('?' * len(months))})"
-        params += months
-    if through is not None:
-        sql += f" AND {TXN_MONTH_SQL} <= ?"
-        params.append(through)
-    sql += " GROUP BY s.person_id"
-    return {r["person_id"]: r["total"] for r in conn.execute(sql, params)}

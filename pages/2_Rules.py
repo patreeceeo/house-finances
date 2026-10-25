@@ -16,9 +16,7 @@ st.caption(
     "pattern, then the newest rule. Rows you tagged by hand are never changed."
 )
 
-flash = ss.pop("_rules_flash", None)
-if flash:
-    st.success(flash)
+ui.show_flash("rules")
 
 LEAVE = "Leave past transactions as they are"
 REAPPLY = "Re-apply to past rule-tagged transactions"
@@ -38,7 +36,7 @@ def done(msg: str, result: rules.ApplyResult | None, rule_id: int) -> None:
     for key in list(ss.keys()):
         if isinstance(key, str) and key.startswith("rule_") and key.endswith(f"_{rule_id}"):
             del ss[key]
-    ss["_rules_flash"] = msg
+    ui.flash("rules", msg)
     st.rerun()
 
 

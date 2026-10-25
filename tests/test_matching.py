@@ -5,7 +5,7 @@ All data is synthetic.
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import balances, db, matching, splits
 from housefin.matching import Item
@@ -42,9 +42,9 @@ def house(conn):
     return {
         "ann": add_resident(conn, "Ann"),
         "bob": add_resident(conn, "Bob"),
-        "rent": db.get_purpose_id(conn, "Rent"),
-        "costco": db.get_purpose_id(conn, "Costco"),
-        "transfer": db.get_transfer_purpose_id(conn),
+        "rent": purpose_id(conn, "Rent"),
+        "costco": purpose_id(conn, "Costco"),
+        "transfer": purpose_id(conn, "Transfer"),
     }
 
 
@@ -139,7 +139,7 @@ def test_paid_ahead():
         (("2026-01",), 1000, 1000, 0),
         ((), 750, 0, 750),
     ]
-    assert groups[1].paid_ahead and not groups[0].paid_ahead
+    assert not groups[1].months and groups[0].months
 
 
 def test_refund_shares():
@@ -491,7 +491,7 @@ def test_split_by_month(conn, house):
     # A suggestion can be split too (it is kept as it goes); paid ahead can't.
     tx(conn, "2026-04-01", 50, person=h["ann"])
     ahead = ann_groups(conn, h)[-1]
-    assert ahead.paid_ahead and not ahead.kept
+    assert not ahead.months and not ahead.kept
     with pytest.raises(ValueError):
         matching.split_by_month(conn, h["ann"], None, ahead.key)
 

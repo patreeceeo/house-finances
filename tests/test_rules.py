@@ -1,6 +1,6 @@
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, house_id, purpose_id
 
 from housefin import db, rules
 
@@ -16,6 +16,10 @@ def conn():
 
 
 _seq = iter(range(1, 10**6))
+
+
+def best(conn, description, amount_cents):
+    return rules.best_rule(rules.all_rules(conn), description, amount_cents)
 
 
 def add_txn(conn, description, amount_cents, *, source=None, person_id=None, purpose_id=None):
@@ -43,7 +47,7 @@ def txn(conn, tid):
 
 
 def pid(conn, name):
-    return db.get_purpose_id(conn, name)
+    return purpose_id(conn, name)
 
 
 # --- matching ----------------------------------------------------------------
@@ -119,18 +123,18 @@ def test_specificity_exact_then_longest_then_newest(conn):
                                    purpose_id=other, apply=False)
     r_long, _ = rules.create_rule(conn, "COSTCO BY INSTACART", "withdrawal",
                                   match_type="contains", purpose_id=costco, apply=False)
-    assert rules.find_best_rule(conn, "IC* COSTCO BY INSTACART", -2000).id == r_long
+    assert best(conn, "IC* COSTCO BY INSTACART", -2000).id == r_long
 
     # Same length: newest wins (created_at ties broken by id).
     r_newer, _ = rules.create_rule(conn, "IC* COSTCO BY INSTACAR", "withdrawal",
                                    match_type="contains", purpose_id=rent, apply=False)
     r_same_len, _ = rules.create_rule(conn, "C* COSTCO BY INSTACART", "withdrawal",
                                       match_type="contains", purpose_id=other, apply=False)
-    assert rules.find_best_rule(conn, "IC* COSTCO BY INSTACART", -2000).id == r_same_len
+    assert best(conn, "IC* COSTCO BY INSTACART", -2000).id == r_same_len
 
     r_exact, _ = rules.create_rule(conn, "IC* COSTCO BY INSTACART", "withdrawal",
                                    purpose_id=costco, apply=False)
-    assert rules.find_best_rule(conn, "IC*  COSTCO BY INSTACART", -2000).id == r_exact
+    assert best(conn, "IC*  COSTCO BY INSTACART", -2000).id == r_exact
     res = rules.apply_rules(conn)
     assert res.updated == [t] and res.purpose_changed == [t]
     assert txn(conn, t)["purpose_id"] == costco
@@ -143,7 +147,7 @@ def test_newest_wins_with_explicit_created_at(conn):
     b, _ = rules.create_rule(conn, "WEB_", "withdrawal", match_type="contains",
                              purpose_id=pid(conn, "PG&E"), apply=False)
     conn.execute("UPDATE rules SET created_at = '2030-01-01 00:00:00' WHERE id = ?", (a,))
-    assert rules.find_best_rule(conn, "PG&E WEB_ONLINE", -1).id == a
+    assert best(conn, "PG&E WEB_ONLINE", -1).id == a
 
 
 # --- applying ----------------------------------------------------------------
@@ -158,7 +162,7 @@ def test_manual_tags_untouched(conn):
     assert txn(conn, manual)["category_source"] == "manual"
     # Explicit ids, reapply and delete also leave manual rows alone.
     assert rules.apply_rules(conn, [manual]).updated == []
-    assert manual not in rules.reapply_rule(conn, rid).updated
+    assert manual not in rules.update_rule(conn, rid, reapply=True).updated
     rules.delete_rule(conn, rid, reapply=True)
     assert txn(conn, manual)["category_source"] == "manual"
 
@@ -170,7 +174,7 @@ def test_apply_rules_to_given_ids_only(conn):
     res = rules.apply_rules(conn, [a])
     assert res.updated == [a]
     assert txn(conn, b)["category_source"] is None
-    assert len(rules.apply_rules(conn)) == 1  # now b
+    assert len(rules.apply_rules(conn).updated) == 1  # now b
 
 
 def test_refund_deposit_rule_sets_purpose_and_clears_person(conn):
@@ -215,9 +219,9 @@ def test_update_rule_reapply_retags_rule_rows(conn):
     rid, _ = rules.create_rule(conn, "PGANDE", "withdrawal", match_type="contains",
                                purpose_id=pid(conn, "Other"))
     # Without reapply nothing changes.
-    assert len(rules.update_rule(conn, rid, purpose_id=pid(conn, "PG&E"))) == 0
+    assert len(rules.update_rule(conn, rid, purpose_id=pid(conn, "PG&E")).updated) == 0
     assert txn(conn, t1)["purpose_id"] == pid(conn, "Other")
-    res = rules.reapply_rule(conn, rid)
+    res = rules.update_rule(conn, rid, reapply=True)
     assert sorted(res.purpose_changed) == sorted([t1, t2])
     assert txn(conn, t1)["purpose_id"] == pid(conn, "PG&E")
 
@@ -233,7 +237,7 @@ def test_update_rule_reapply_tags_newly_matching_uncategorized(conn):
     t = add_txn(conn, "WATER BILL", -100)
     rid, res = rules.create_rule(conn, "WATER", "withdrawal", match_type="exact",
                                  purpose_id=pid(conn, "Water"))
-    assert len(res) == 0
+    assert res.updated == []
     res = rules.update_rule(conn, rid, match_type="contains", reapply=True)
     assert res.updated == [t]
 
@@ -244,7 +248,7 @@ def test_delete_rule_falls_back_to_next_rule(conn):
                       purpose_id=pid(conn, "Other"))
     r2, _ = rules.create_rule(conn, "COSTCO BY INSTACART", "withdrawal", match_type="contains",
                               purpose_id=pid(conn, "Costco"), apply=False)
-    rules.reapply_rule(conn, r2)
+    rules.update_rule(conn, r2, reapply=True)
     assert txn(conn, t)["purpose_id"] == pid(conn, "Costco")
     res = rules.delete_rule(conn, r2, reapply=True)
     assert res.purpose_changed == [t] and res.cleared == []
@@ -255,7 +259,7 @@ def test_delete_rule_falls_back_to_next_rule(conn):
 def test_delete_rule_without_reapply_keeps_tags(conn):
     t = add_txn(conn, "RECOLOGY", -100)
     rid, _ = rules.create_rule(conn, "RECOLOGY", "withdrawal", purpose_id=pid(conn, "Recology"))
-    assert len(rules.delete_rule(conn, rid)) == 0
+    assert rules.delete_rule(conn, rid).updated == []
     assert txn(conn, t)["category_source"] == "rule"
 
 
@@ -273,7 +277,7 @@ def test_delete_rule_without_reapply_keeps_tags(conn):
 def test_rule_from_any_description(conn, desc):
     t = add_txn(conn, desc, 100)
     other = add_txn(conn, desc, 100)
-    rules.create_rule_from_transaction(conn, t, person_id=db.get_house_id(conn))
+    rules.create_rule_from_transaction(conn, t, person_id=house_id(conn))
     assert txn(conn, other)["category_source"] == "rule"
 
 
@@ -290,9 +294,7 @@ def test_list_rules_with_match_counts(conn):
     summaries = rules.list_rules(conn)
     by_pattern = {s.rule.pattern: s for s in summaries}
     assert by_pattern["RECOLOGY"].match_count == 2
-    assert by_pattern["RECOLOGY"].target_name == "Recology"
     assert by_pattern["NOBODY"].match_count == 0
-    assert by_pattern["NOBODY"].target_name == "Alice"
     assert summaries[0].rule.pattern == "NOBODY"  # newest first
 
 
@@ -306,7 +308,7 @@ def test_preview_uncategorized_only(conn):
 def test_seeded_interest_rule(tmp_path):
     path = tmp_path / "f.db"
     c = db.connect(path)
-    house = db.get_house_id(c)
+    house = house_id(c)
     seeded = rules.all_rules(c)
     assert [(r.match_type, r.pattern, r.applies_to, r.person_id) for r in seeded] == [
         ("exact", "Interest Paid", "deposit", house)

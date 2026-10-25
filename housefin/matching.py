@@ -127,10 +127,6 @@ class Group:
         """Paid - shares: positive = credit, negative = owed, 0 = balanced."""
         return self.paid_cents - self.share_cents
 
-    @property
-    def paid_ahead(self) -> bool:
-        return not self.months
-
 
 def _through(months: Iterable[str] | None) -> str | None:
     """The latest selected month (None/empty -> None, i.e. all time)."""

@@ -27,10 +27,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
-from housefin import db, splits
-from housefin.splits import TXN_MONTH_SQL
+from housefin import dates, db, rent
 
 _NOT_EXCLUDED = "COALESCE(pu.excluded, 0) = 0"
+_MONTH = dates.month_sql("t")
 _JOIN_PURPOSE = " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
 
 
@@ -51,10 +51,10 @@ class BalanceRow:
 def _month_clause(months: list[str] | None, through: str | None) -> tuple[str, list]:
     sql, params = "", []
     if months is not None:
-        sql += f" AND {TXN_MONTH_SQL} IN ({','.join('?' * len(months))})"
+        sql += f" AND {_MONTH} IN ({','.join('?' * len(months))})"
         params += months
     if through is not None:
-        sql += f" AND {TXN_MONTH_SQL} <= ?"
+        sql += f" AND {_MONTH} <= ?"
         params.append(through)
     return sql, params
 
@@ -92,12 +92,23 @@ def share_totals(
     *,
     through: str | None = None,
 ) -> dict[int, int]:
-    """``{person_id: SUM(share_cents)}`` (House included; Transfer excluded)."""
-    return splits.share_totals(conn, _norm(months), through=through)
+    """``{person_id: SUM(share_cents)}`` (House included; Transfer excluded).
+    Positive = owed (see the sign convention in :mod:`housefin.splits`)."""
+    clause, params = _month_clause(_norm(months), through)
+    rows = conn.execute(
+        "SELECT s.person_id, SUM(s.share_cents) AS total FROM splits s"
+        " JOIN transactions t ON t.id = s.transaction_id"
+        + _JOIN_PURPOSE
+        + f" WHERE {_NOT_EXCLUDED}"
+        + clause
+        + " GROUP BY s.person_id",
+        params,
+    )
+    return {r["person_id"]: r["total"] for r in rows}
 
 
 def latest_month(conn: sqlite3.Connection) -> str | None:
-    row = conn.execute(f"SELECT MAX({TXN_MONTH_SQL}) FROM transactions t").fetchone()
+    row = conn.execute(f"SELECT MAX({_MONTH}) FROM transactions t").fetchone()
     return row[0]
 
 
@@ -133,7 +144,7 @@ def balances(conn: sqlite3.Connection, months: Iterable[str] | None = None) -> l
         run_share = share_totals(conn, through=through)
 
     in_house = set().union(*(db.in_house_ids(conn, m) for m in months)) if months else set()
-    first_ref, last_ref = f"{ref}-01", db.month_end(ref)
+    first_ref, last_ref = f"{ref}-01", dates.month_end(ref)
     started = {
         r[0] for r in conn.execute(
             "SELECT DISTINCT person_id FROM room_assignments WHERE start_date <= ?", (last_ref,)
@@ -170,9 +181,9 @@ def balances(conn: sqlite3.Connection, months: Iterable[str] | None = None) -> l
             # reference month).
             # Someone away for the selected months (rooms before and after)
             # still shows while their running balance is not zero.
-            active = pid in started if months is None else pid in in_house
+            present = pid in started if months is None else pid in in_house
             keep = (
-                active or row.paid_in_cents != 0 or row.share_cents != 0
+                present or row.paid_in_cents != 0 or row.share_cents != 0
                 or row.running_cents != 0
             )
         if keep:
@@ -193,7 +204,7 @@ def paid_in_transactions(
     """
     clause, params = _month_clause(_norm(months), through)
     return conn.execute(
-        f"SELECT t.id, t.date, {TXN_MONTH_SQL} AS month, t.amount_cents, t.description"
+        f"SELECT t.id, t.date, {_MONTH} AS month, t.amount_cents, t.description"
         " FROM transactions t"
         + _JOIN_PURPOSE
         + f" WHERE t.person_id = ? AND {_NOT_EXCLUDED}"
@@ -217,7 +228,7 @@ def share_transactions(
     """
     clause, params = _month_clause(_norm(months), through)
     return conn.execute(
-        f"SELECT t.id, t.date, {TXN_MONTH_SQL} AS month, t.amount_cents, t.description,"
+        f"SELECT t.id, t.date, {_MONTH} AS month, t.amount_cents, t.description,"
         " pu.name AS purpose, s.weight, s.share_cents"
         " FROM splits s JOIN transactions t ON t.id = s.transaction_id"
         + _JOIN_PURPOSE
@@ -254,13 +265,13 @@ def rent_awaiting_review(
 ) -> tuple[int, int]:
     """``(count, total_cents)`` of the :func:`uncategorized_withdrawals` that
     are payments of the purpose split by rooms (Rent) with no split yet
-    (:data:`splits.ROOM_REVIEW_SQL`): usually a room was vacant that month and
+    (:data:`rent.NEEDS_REVIEW_SQL`): usually a room was vacant that month and
     nobody has said who covers its share. The total is in bank sign."""
     clause, params = _month_clause(_norm(months), None)
     row = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(t.amount_cents), 0) FROM transactions t"
         " WHERE t.amount_cents < 0 AND t.person_id IS NULL AND "
-        + splits.ROOM_REVIEW_SQL
+        + rent.NEEDS_REVIEW_SQL
         + clause,
         params,
     ).fetchone()
@@ -271,7 +282,7 @@ def splits_pending_review(
     conn: sqlite3.Connection, months: Iterable[str] | None = None
 ) -> tuple[int, int]:
     """``(count, total_cents)`` of transactions in the months whose default
-    split left someone out (not active that month), so everyone else's share
+    split left someone out (not in the house that month), so everyone else's share
     was scaled up and a person has not confirmed it yet. The total is in bank
     sign."""
     clause, params = _month_clause(_norm(months), None)

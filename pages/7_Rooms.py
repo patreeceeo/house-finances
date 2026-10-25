@@ -3,7 +3,7 @@
 import pandas as pd
 import streamlit as st
 
-from housefin import db, people, rooms, splits, ui
+from housefin import db, fmt, people, rooms, splits, ui
 from housefin import rooms_ui as ru
 
 st.set_page_config(page_title="Rooms · House Finances", layout="wide")
@@ -19,10 +19,6 @@ st.caption(
 )
 
 
-def _flash(kind: str, text: str) -> None:
-    ss["_rooms_flash"] = (kind, text)
-
-
 def _bump(name: str) -> None:
     ss[f"_rooms_ver_{name}"] = ss.get(f"_rooms_ver_{name}", 0) + 1
 
@@ -31,9 +27,7 @@ def _ver(name: str) -> int:
     return ss.get(f"_rooms_ver_{name}", 0)
 
 
-flash = ss.pop("_rooms_flash", None)
-if flash:
-    getattr(st, flash[0])(flash[1])
+ui.show_flash("rooms")
 
 everyone = db.list_people(conn)
 people_by_name = {p["name"]: p["id"] for p in everyone}  # House refused by rooms.py
@@ -60,10 +54,10 @@ def _save_rooms(key: str) -> None:
     try:
         ru.save_room_table(conn, rows, ss.get(key))
     except rooms.RoomError as exc:
-        _flash("error", str(exc))
+        ui.flash("rooms", str(exc), "error")
         return
     _bump("rooms")
-    _flash("success", "Saved the rooms.")
+    ui.flash("rooms", "Saved the rooms.")
 
 
 st.data_editor(
@@ -128,7 +122,7 @@ def _save_assignments(room_id: int, key: str) -> None:
         return
     ss.pop(f"_rooms_error_{room_id}", None)
     _bump(f"room_{room_id}")
-    _flash("success", f"Saved {rooms.get_room(conn, room_id)['name']}.")
+    ui.flash("rooms", f"Saved {rooms.get_room(conn, room_id)['name']}.")
 
 
 def _discard_assignments(room_id: int) -> None:
@@ -139,7 +133,7 @@ def _discard_assignments(room_id: int) -> None:
 def _confirm(room_id: int, name: str) -> None:
     n = ru.confirm_seeded(conn, room_id)
     _bump(f"room_{room_id}")
-    _flash("success", f"Confirmed {n} row{'s' if n != 1 else ''} in {name}.")
+    ui.flash("rooms", f"Confirmed {n} row{'s' if n != 1 else ''} in {name}.")
 
 
 all_rooms = rooms.list_rooms(conn)
@@ -221,7 +215,7 @@ if names.empty:
     st.info("Nobody has been assigned to a room yet.")
 else:
     st.container(key="rooms_timeline").dataframe(
-        ru.timeline_styler(conn).format_index(ui.format_date, axis=0),
+        ru.timeline_styler(conn).format_index(fmt.date, axis=0),
         lazy=False,
         alt="Timeline of who was in each room",
     )
@@ -240,16 +234,16 @@ if missing:
 
     def _dismiss(pid: int, pname: str) -> None:
         people.dismiss_not_in_a_room(conn, pid)
-        _flash("success", f"Dismissed {pname}.")
+        ui.flash("rooms", f"Dismissed {pname}.")
 
     for p in missing:
         start, until = p["active_from"], p["active_until"]
         if start and until:
-            old = f"{ui.format_month(start)} to {ui.format_month(until)}"
+            old = f"{fmt.month(start)} to {fmt.month(until)}"
         elif start:
-            old = f"{ui.format_month(start)} onwards"
+            old = f"{fmt.month(start)} onwards"
         elif until:
-            old = f"until {ui.format_month(until)}"
+            old = f"until {fmt.month(until)}"
         else:
             old = "none set"
         with st.container(horizontal=True, vertical_alignment="center", key=f"rooms_missing_{p['id']}"):

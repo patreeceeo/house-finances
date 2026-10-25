@@ -3,7 +3,7 @@
 import pandas as pd
 import streamlit as st
 
-from housefin import colors, db, people, ui
+from housefin import colors, dates, db, fmt, people, ui
 
 st.set_page_config(page_title="People · House Finances", layout="wide")
 conn = ui.get_conn()
@@ -17,17 +17,15 @@ st.caption(
     "added to remembered splits; edit a split to include them."
 )
 
-flash = ss.pop("_people_flash", None)
-if flash:
-    st.success(flash)
+ui.show_flash("people")
 
 
 def done(msg: str) -> None:
-    ss["_people_flash"] = msg
+    ui.flash("people", msg)
     st.rerun()
 
 
-now = people.current_month()
+now = dates.current_month()
 everyone = db.list_people(conn)
 
 # --- list ------------------------------------------------------------------------
@@ -65,7 +63,7 @@ def _swatch(col: pd.Series) -> list[str]:
     ]
 
 
-status_label = f"Status in {ui.format_month(now)}"
+status_label = f"Status in {fmt.month(now)}"
 st.dataframe(
     table.rename(columns={"Status": status_label}).style.apply(_swatch, subset=["Color"]),
     hide_index=True,

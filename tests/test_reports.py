@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from housefin import db, reports, splits
+from housefin import db, fmt, reports, splits
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -180,7 +180,7 @@ def test_csv_matches_table(conn):
 
 
 def test_csv_negative_and_empty():
-    assert reports._dollars(-5) == "-0.05"
+    assert fmt.csv_dollars(-5) == "-0.05"
     assert reports.to_csv([], reports.DEPOSITS_BY_PERSON) == "Group,Count,Total in ($)\n"
 
 
@@ -221,11 +221,6 @@ def test_period_months(conn):
                                                  "2026-10"]
     assert reports.period_months(conn, ["2026-10", "2026-06"]) == ["2026-06", "2026-10"]
     assert reports.period_months(db.connect(":memory:"), None) == []
-
-
-def test_next_month_rolls_over_the_year():
-    assert reports._next_month("2026-12") == "2027-01"
-    assert reports._next_month("2026-09") == "2026-10"
 
 
 def test_monthly_by_purpose(conn):

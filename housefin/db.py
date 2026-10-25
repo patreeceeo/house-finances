@@ -6,14 +6,13 @@ Booleans are stored as 0/1 integers.
 
 from __future__ import annotations
 
-import calendar
 import datetime as _dt
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from housefin import colors
+from housefin import colors, dates
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "finances.db"
 
@@ -106,8 +105,8 @@ CREATE INDEX IF NOT EXISTS imports_file_hash ON imports (file_hash);
 
 # Ordered migrations; MIGRATIONS[i] takes the DB from user_version i to i + 1.
 # Append new entries (never edit old ones) to change the schema.
-# v2: default rule tagging 'Interest Paid' deposits to the House (spec open
-# question 4). Seeded by a migration so it runs once per DB and a user delete
+# v2: default rule tagging 'Interest Paid' deposits to the House. Seeded by a
+# migration so it runs once per DB and a user delete
 # sticks. The House is created here if missing (fresh DB: migrations run
 # before _ensure_house); the name matches HOUSE_NAME.
 _SEED_INTEREST_RULE_V2 = """
@@ -157,8 +156,7 @@ SELECT t.id, ps.person_id, ps.weight
                     WHERE s.transaction_id = t.id AND s.person_id = ps.person_id);
 """
 
-# v5: rooms and who slept in them (docs/rooms-spec.md; data layer in
-# housefin.rooms). Each room carries a fixed percent of the rent (all rooms
+# v5: rooms and who slept in them (data layer in housefin.rooms). Each room carries a fixed percent of the rent (all rooms
 # total exactly 100, enforced by the app). Assignment dates are 'YYYY-MM-DD'
 # nights, both ends inclusive; NULL end_date = still there. seeded = 1 marks
 # rows a migration created that a person has not checked yet. people.color is
@@ -187,8 +185,7 @@ ALTER TABLE purposes ADD COLUMN split_by_rooms INTEGER NOT NULL DEFAULT 0;
 """
 
 # v6: seed rooms from the Rent default split and the old active months, then
-# drop people.active_from / active_until (docs/rooms-spec.md, "Migration from
-# current data"). Data-dependent, so it is a Python step (see _seed_rooms_v6).
+# drop people.active_from / active_until. Data-dependent, so it is a Python step (see _seed_rooms_v6).
 # old_active_months keeps, for each non-House person who got no room, the
 # months they had (NULL = unbounded) so the Rooms screen can list them under
 # "Not in a room" (housefin.people.not_in_a_room) until they are placed.
@@ -225,12 +222,6 @@ CREATE INDEX IF NOT EXISTS match_group_items_group ON match_group_items (group_i
 """
 
 RENT = "Rent"
-
-
-def month_end(month: str) -> str:
-    """Last date ('YYYY-MM-DD') of a 'YYYY-MM' month."""
-    year, mon = map(int, month.split("-"))
-    return f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
 
 
 def _seed_rooms_v6(conn: sqlite3.Connection) -> None:
@@ -289,7 +280,7 @@ def _seed_rooms_v6(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO room_assignments (room_id, person_id, start_date, end_date, seeded)"
                 " VALUES (?, ?, ?, ?, 1)",
-                (room_id, pid, f"{start_month}-01", month_end(until) if until else None),
+                (room_id, pid, f"{start_month}-01", dates.month_end(until) if until else None),
             )
             placed.add(pid)
 
@@ -426,13 +417,9 @@ def _ensure_house(conn: sqlite3.Connection) -> None:
 # --- lookups -----------------------------------------------------------------
 
 
-def get_house_id(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT id FROM people WHERE is_house = 1").fetchone()[0]
-
-
 # A person is in the house for a month when assigned to any room on any night
-# of it (docs/rooms-spec.md). Dates are 'YYYY-MM-DD' text, so they compare in
-# date order; NULL end_date = still there.
+# of it. Dates are 'YYYY-MM-DD' text, so they compare in date order; NULL
+# end_date = still there.
 _IN_MONTH_SQL = (
     "EXISTS (SELECT 1 FROM room_assignments ra WHERE ra.person_id = people.id"
     " AND ra.start_date <= :last AND (ra.end_date IS NULL OR ra.end_date >= :first))"
@@ -440,7 +427,7 @@ _IN_MONTH_SQL = (
 
 
 def _month_params(month: str) -> dict[str, str]:
-    return {"first": f"{month}-01", "last": month_end(month)}
+    return {"first": f"{month}-01", "last": dates.month_end(month)}
 
 
 def in_house_ids(conn: sqlite3.Connection, month: str) -> set[int]:
@@ -451,7 +438,7 @@ def in_house_ids(conn: sqlite3.Connection, month: str) -> set[int]:
     return {r[0] for r in rows}
 
 
-def is_active(conn: sqlite3.Connection, person: sqlite3.Row | int, month: str) -> bool:
+def in_house(conn: sqlite3.Connection, person: sqlite3.Row | int, month: str) -> bool:
     """Whether a person (row or id) is in the house in 'YYYY-MM': assigned to
     any room on any night of it. The House always is."""
     pid = person if isinstance(person, int) else person["id"]
@@ -469,7 +456,7 @@ def list_people(conn: sqlite3.Connection, *, include_house: bool = True) -> list
     return conn.execute(sql + " ORDER BY is_house DESC, name").fetchall()
 
 
-def active_people(
+def people_in_house(
     conn: sqlite3.Connection, month: str, *, include_house: bool = False
 ) -> list[sqlite3.Row]:
     """People in the house in 'YYYY-MM' (in a room on any night of it),
@@ -508,18 +495,6 @@ def list_purposes(conn: sqlite3.Connection, *, include_excluded: bool = True) ->
 def get_purpose(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
     """Purpose row by exact name, or None."""
     return conn.execute("SELECT * FROM purposes WHERE name = ?", (name,)).fetchone()
-
-
-def get_purpose_id(conn: sqlite3.Connection, name: str) -> int:
-    """Id of an existing purpose; KeyError if there is none by that name."""
-    row = get_purpose(conn, name)
-    if row is None:
-        raise KeyError(name)
-    return row["id"]
-
-
-def get_transfer_purpose_id(conn: sqlite3.Connection) -> int:
-    return get_purpose_id(conn, TRANSFER)
 
 
 def add_purpose(conn: sqlite3.Connection, name: str, *, excluded: bool = False) -> int:

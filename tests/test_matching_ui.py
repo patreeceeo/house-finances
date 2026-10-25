@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import db, matching, splits
 from housefin import matching_ui as mu
@@ -35,7 +35,7 @@ def _house(c):
     """Ann and Bob split rent 1:1. Ann: Jan paid exactly, Feb short by 100,
     Mar paid 1100 (suggested: Jan balanced; Feb+Mar balanced together)."""
     h = {"ann": add_resident(c, "Ann"), "bob": add_resident(c, "Bob")}
-    rent = db.get_purpose_id(c, "Rent")
+    rent = purpose_id(c, "Rent")
     split = [(h["ann"], 1), (h["bob"], 1)]
     for m, paid in (("01", 1000), ("02", 900), ("03", 1100)):
         h[f"rent_{m}"] = tx(c, f"2026-{m}-01", -2000, purpose=rent, weights=split,
@@ -106,9 +106,9 @@ def test_dates_and_months_follow_locale(conn, house):
 
 def test_owed_credit_refund_and_paid_ahead(conn, house):
     h = house
-    tx(conn, "2026-04-01", -2000, purpose=db.get_purpose_id(conn, "Rent"),
+    tx(conn, "2026-04-01", -2000, purpose=purpose_id(conn, "Rent"),
        weights=[(h["ann"], 1), (h["bob"], 1)])
-    tx(conn, "2026-04-10", 300, purpose=db.get_purpose_id(conn, "Costco"),
+    tx(conn, "2026-04-10", 300, purpose=purpose_id(conn, "Costco"),
        weights=[(h["ann"], 1), (h["bob"], 1)], description="COSTCO refund")
     data = mu.group_data(_groups(conn, h))
     apr = data[-1]
@@ -272,7 +272,7 @@ def test_edit_callback_applies_once_and_flashes(conn, house, monkeypatch):
     assert "_mg_flash" not in state
     state["mg"] = {"edit": _event(person=h["ann"], action="keep", group=jan.key)}
     callback()  # a new event naming the suggestion that is now kept
-    assert state["_mg_flash"] == mu.STALE
+    assert state["_mg_flash"] == ("warning", mu.STALE)
 
 
 # --- page (AppTest) ------------------------------------------------------------------

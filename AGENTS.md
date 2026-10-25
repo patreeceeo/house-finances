@@ -1,27 +1,6 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
-
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [sync-concepts](https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
-
-## Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+This project uses **bd** (beads) for issue tracking: see the Beads section below and run `bd prime`.
 
 ## Build & Test
 
@@ -35,6 +14,30 @@ uv run pytest           # run the test suite
 The app's data lives in `finances.db` (SQLite, gitignored) in the project root;
 `housefin.db.connect()` creates and migrates it on first use. Tests use
 in-memory or temp-dir databases only.
+
+## Architecture
+
+README.md explains how the money works (signs, tags, months, splits, rent by
+rooms, balances) and maps the code. Domain logic lives in `housefin/` with no
+Streamlit dependency, so it can be tested directly; `pages/` are the
+Streamlit screens, and `*_ui.py` modules hold helpers for one page. Only
+`ui.py`, `matching_ui.py` and `fmt.browser_locale` import Streamlit, inside
+the functions that need it.
+
+## Conventions
+
+- Money is integer cents. Transaction amounts carry the bank's sign; shares
+  carry the person's (see `housefin/splits.py`).
+- Calculations are transparent and decisions are made by people: never
+  rescale a split, round an entered value or fill in a vacancy silently.
+  Surface it and let the user confirm.
+- Months and dates shown to people go through `housefin.fmt`, which follows
+  the browser's locale. Month arithmetic and month SQL live in
+  `housefin.dates`.
+- Group writes with `db.transaction`. Change the schema by appending to
+  `db.MIGRATIONS`; never edit an existing migration.
+- Tests use in-memory or temp-dir databases; shared helpers are in
+  `tests/helpers.py`.
 
 ## Non-Interactive Shell Commands
 

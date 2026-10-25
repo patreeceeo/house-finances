@@ -1,8 +1,8 @@
 """Purposes: add, rename and (guarded) delete, plus default-split editing helpers.
 
 The built-in Transfer purpose is protected: it is looked up by name
-(:func:`db.get_transfer_purpose_id`), so it can be neither renamed nor
-deleted, and as an excluded purpose it never has a split.
+(``db.TRANSFER``), so it can be neither renamed nor deleted, and as an
+excluded purpose it never has a split.
 
 Default splits live in ``purpose_splits`` (see :mod:`housefin.splits`).
 Changing one only affects withdrawals that get their split later; existing
@@ -11,19 +11,14 @@ transaction splits are never touched here.
 
 from __future__ import annotations
 
-import datetime as _dt
 import sqlite3
 from collections.abc import Mapping
 
-from housefin import db, splits
+from housefin import dates, db, splits
 
 
 class PurposeError(ValueError):
     """A purpose change was refused; the message is meant for the user."""
-
-
-def current_month() -> str:
-    return _dt.date.today().strftime("%Y-%m")
 
 
 def is_split_by_rooms(purpose: sqlite3.Row | Mapping) -> bool:
@@ -145,22 +140,15 @@ def list_with_usage(conn: sqlite3.Connection) -> list[dict]:
 # --- default splits ------------------------------------------------------------
 
 
-def percentages(weights: Mapping[int, float]) -> dict[int, float]:
-    """``{person_id: percent}`` of the positive weights (0 for the others);
-    all zeros when nothing is weighted."""
-    total = sum(w for w in weights.values() if w > 0)
-    return {pid: (100.0 * w / total if total and w > 0 else 0.0) for pid, w in weights.items()}
-
-
 def split_candidates(conn: sqlite3.Connection, month: str | None = None) -> list[sqlite3.Row]:
-    """People offered in a default split editor: those active in ``month``
+    """People offered in a default split editor: those in the house in ``month``
     (default: this month) plus the House (listed first)."""
-    return db.active_people(conn, month or current_month(), include_house=True)
+    return db.people_in_house(conn, month or dates.current_month(), include_house=True)
 
 
 def even_split_people(conn: sqlite3.Connection, month: str | None = None) -> list[sqlite3.Row]:
     """Who the no-default fallback splits among in ``month`` (House excluded)."""
-    return db.active_people(conn, month or current_month())
+    return db.people_in_house(conn, month or dates.current_month())
 
 
 def save_default_split(
@@ -176,7 +164,7 @@ def save_default_split(
     zero means "not in the split". Stored weights of people who are not
     offered (moved out, or not yet moved in) are kept, since
     ``splits.default_split_for`` already drops them in months they are
-    inactive. All zeros (and nobody hidden) clears the default, i.e. the
+    not in the house. All zeros (and nobody hidden) clears the default, i.e. the
     even-split fallback. Excluded purposes (Transfer) are refused. Past
     transactions are not changed.
     """
@@ -204,7 +192,7 @@ def _refuse_split_by_rooms(row: sqlite3.Row) -> None:
 
 
 def clear_default_split(conn: sqlite3.Connection, purpose_id: int) -> None:
-    """Back to the even split among active housemates (refused for a purpose
+    """Back to the even split among housemates in the house (refused for a purpose
     split by rooms, which has no default split)."""
     _refuse_split_by_rooms(_get(conn, purpose_id))
     splits.set_purpose_split(conn, purpose_id, [])

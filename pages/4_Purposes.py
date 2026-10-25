@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from housefin import db, purposes, splits, ui
+from housefin import db, fmt, purposes, splits, ui
 
 st.set_page_config(page_title="Purposes · House Finances", layout="wide")
 conn = ui.get_conn()
@@ -16,17 +16,13 @@ st.caption(
 )
 
 
-def _flash(kind: str, text: str) -> None:
-    ss["_purposes_flash"] = (kind, text)
-
-
 def _run(action, ok: str) -> bool:
     try:
         action()
     except purposes.PurposeError as exc:
-        _flash("error", str(exc))
+        ui.flash("purposes", str(exc), "error")
         return False
-    _flash("success", ok)
+    ui.flash("purposes", ok)
     return True
 
 
@@ -54,7 +50,7 @@ def _save_split(pid: int, name: str, person_ids: list[int], ver: int) -> None:
     shown = splits.to_percents(splits.get_purpose_split(conn, pid))
     if all(weights[p] == shown.get(p, 0.0) for p in person_ids):
         # Unchanged: the stored weights are exact; what is shown may be rounded.
-        _flash("info", f"No changes to the default split for {name}.")
+        ui.flash("purposes", f"No changes to the default split for {name}.", "info")
         return
     if _run(
         lambda: purposes.save_default_split(conn, pid, weights),
@@ -71,9 +67,7 @@ def _clear_split(pid: int, name: str) -> None:
         _bump(pid)
 
 
-flash = ss.pop("_purposes_flash", None)
-if flash:
-    getattr(st, flash[0])(flash[1])
+ui.show_flash("purposes")
 
 with st.form("add_purpose", clear_on_submit=False, border=False):
     c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
@@ -91,7 +85,7 @@ def _summary(stored: list[tuple[int, float]]) -> str:
         return "even split among active housemates"
     pct = splits.to_percents(stored)
     return ", ".join(
-        f"{people[pid]['name'] if pid in people else pid} {ui.format_percent(pct[pid])}"
+        f"{people[pid]['name'] if pid in people else pid} {fmt.percent(pct[pid])}"
         for pid, _ in stored
     )
 

@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import categorize as cat
 from housefin import db, rules, splits
@@ -44,8 +44,8 @@ def conn():
 def setup(conn):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
-    costco = db.get_purpose_id(conn, "Costco")
-    water = db.get_purpose_id(conn, "Water")
+    costco = purpose_id(conn, "Costco")
+    water = purpose_id(conn, "Water")
     return conn, a, b, costco, water
 
 
@@ -138,7 +138,7 @@ def test_changing_default_never_changes_past_splits(setup):
 
 def test_excluded_and_cleared_purpose_reset_source(setup):
     conn, a, b, costco, water = setup
-    transfer = db.get_transfer_purpose_id(conn)
+    transfer = purpose_id(conn, "Transfer")
     t1 = add_tx(conn, "2026-02-01", -1000, purpose_id=costco)
     t2 = add_tx(conn, "2026-02-01", -1000, purpose_id=costco)
     splits.apply_default_split(conn, [t1, t2])
@@ -248,7 +248,7 @@ def test_purpose_change_gets_new_default(setup):
 
 def test_deposit_transfer_and_clear_reset_source(setup):
     conn, a, b, costco, water = setup
-    transfer = db.get_transfer_purpose_id(conn)
+    transfer = purpose_id(conn, "Transfer")
     dep = add_tx(conn, "2026-02-01", 500)
     cat.save_refund(conn, dep, costco, [(a, 100)])
     assert source(conn, dep) == "manual"
@@ -269,7 +269,8 @@ def test_remember_tags_others_with_default_source(setup):
     other = add_tx(conn, "2026-02-03", -2000, "WAREHOUSE 1")
     res = cat.save_withdrawal(conn, t, costco, [(a, 80), (b, 20)], remember_split=True,
                               remember=True, pattern="WAREHOUSE 1")
-    assert res.rule_tagged_ids == [other]
+    assert res.rule_tagged == 1
+    assert conn.execute("SELECT category_source FROM transactions WHERE id = ?", (other,)).fetchone()[0] == "rule"
     assert source(conn, t) == "manual"
     assert source(conn, other) == "default"
     assert weights(conn, other) == {a: 80, b: 20}

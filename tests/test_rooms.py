@@ -1,5 +1,7 @@
 import pytest
 
+from helpers import house_id
+
 from housefin import db, rooms
 from housefin.rooms import RoomError
 
@@ -13,7 +15,7 @@ def conn():
 
 @pytest.fixture
 def house(conn):
-    """The spec's worked example rooms and people."""
+    """The rooms and people of README's worked example."""
     ids = {
         "Front": rooms.add_room(conn, "Front", 40),
         "Back": rooms.add_room(conn, "Back", 33.375),
@@ -28,6 +30,15 @@ def house(conn):
 # --- dates ---------------------------------------------------------------------
 
 
+def person_nights(occ):
+    """Nights each person spent in any room in the month."""
+    out = {}
+    for room in occ.rooms:
+        for pid, n in room.days.items():
+            out[pid] = out.get(pid, 0) + n
+    return out
+
+
 def test_check_date():
     assert rooms.check_date(None) is None
     assert rooms.check_date("  ") is None
@@ -35,13 +46,6 @@ def test_check_date():
     for bad in ("2026-7-1", "July 1", "2026-02-30", "2026-13-01"):
         with pytest.raises(RoomError):
             rooms.check_date(bad)
-
-
-def test_month_bounds():
-    assert rooms.month_bounds("2026-07") == ("2026-07-01", "2026-07-31")
-    assert rooms.month_bounds("2028-02") == ("2028-02-01", "2028-02-29")
-    with pytest.raises(RoomError):
-        rooms.month_bounds("2026-7")
 
 
 # --- rooms -----------------------------------------------------------------------
@@ -147,7 +151,7 @@ def test_person_overlap_refused(conn, house):
 
 def test_house_and_bad_input_refused(conn, house):
     with pytest.raises(RoomError, match="House can't be assigned"):
-        rooms.add_assignment(conn, house["Front"], db.get_house_id(conn), "2026-01-01")
+        rooms.add_assignment(conn, house["Front"], house_id(conn), "2026-01-01")
     with pytest.raises(RoomError, match="before the first night"):
         rooms.add_assignment(conn, house["Front"], house["Ann"], "2026-02-01", "2026-01-31")
     with pytest.raises(RoomError, match="first night"):
@@ -277,7 +281,7 @@ def test_month_occupancy_worked_example(conn, house):
     assert got["Back"].percent == 33.375
     for r in occ.rooms:
         assert sum(r.days.values()) + r.vacant_days == 31
-    assert occ.person_days() == {
+    assert person_nights(occ) == {
         house["Ann"]: 31, house["Bob"]: 31, house["Cy"]: 10, house["Moana"]: 17,
     }
     assert not occ.fully_occupied
@@ -296,8 +300,8 @@ def test_month_occupancy_same_person_twice_in_room_and_moving(conn, house):
     assert got["Front"].vacant == [("2026-02-11", "2026-02-19")]
     assert got["Back"].days == {house["Ann"]: 9, house["Bob"]: 9}
     assert got["Back"].vacant == [("2026-02-01", "2026-02-10")]
-    assert occ.person_days()[house["Ann"]] == 28
-    with pytest.raises(RoomError):
+    assert person_nights(occ)[house["Ann"]] == 28
+    with pytest.raises(ValueError):
         rooms.month_occupancy(conn, "2026-2")
 
 

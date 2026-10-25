@@ -1,15 +1,16 @@
-"""Categorize rent editor: vacant share and "Recalculate from rooms"
-(docs/rooms-spec.md, "Review when a room is vacant")."""
+"""Categorize rent editor: vacant share and "Recalculate from rooms"."""
 
 from pathlib import Path
 
 import pytest
 
-from housefin import categorize as cat
+from helpers import house_id, needs_room_review, purpose_id
+
+from housefin import categorize as cat, rent
 from housefin import db, rooms, splits
 
 ROOT = Path(__file__).resolve().parent.parent
-JULY = 1572803  # the spec's worked example: $15,728.03
+JULY = 1572803  # README's worked example: $15,728.03
 
 _n = 0
 
@@ -28,7 +29,7 @@ def add_tx(conn, date, amount_cents, purpose_id=None, description="RENT PAYMENT"
 
 
 def build_house(conn):
-    """July 2026 from the spec: Attic vacant 11-31, Nook vacant 1-14."""
+    """July 2026 from README's worked example: Attic vacant 11-31, Nook vacant 1-14."""
     ids = {
         "Front": rooms.add_room(conn, "Front", 40),
         "Back": rooms.add_room(conn, "Back", 33.375),
@@ -41,8 +42,8 @@ def build_house(conn):
     rooms.add_assignment(conn, ids["Back"], ids["Bob"], "2026-01-01")
     rooms.add_assignment(conn, ids["Attic"], ids["Cy"], "2026-01-01", "2026-07-10")
     rooms.add_assignment(conn, ids["Nook"], ids["Moana"], "2026-07-15")
-    ids["House"] = db.get_house_id(conn)
-    ids["Rent"] = db.get_purpose_id(conn, "Rent")
+    ids["House"] = house_id(conn)
+    ids["Rent"] = purpose_id(conn, "Rent")
     return ids
 
 
@@ -69,14 +70,14 @@ def house():
 
 def test_rent_seeded_as_split_by_rooms(house):
     conn, ids = house
-    assert cat.is_rent(conn, ids["Rent"])
-    assert not cat.is_rent(conn, db.get_purpose_id(conn, "Water"))
+    assert rent.is_split_by_rooms(conn, ids["Rent"])
+    assert not rent.is_split_by_rooms(conn, purpose_id(conn, "Water"))
 
 
 def test_plan_needs_vacant_choice(house):
     conn, ids = house
     t = add_tx(conn, "2026-07-01", -JULY)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t))
+    plan = rent.plan(conn, cat.get_transaction(conn, t))
     assert plan.needs_vacant_choice
     assert plan.weights == [] and plan.error.startswith("Choose who covers the vacant share ($2,601.47)")
     assert plan.split.warnings() == [
@@ -85,13 +86,13 @@ def test_plan_needs_vacant_choice(house):
     ]
     # Saving without a choice leaves the payment unsplit, waiting for review.
     cat.save_withdrawal(conn, t, ids["Rent"])
-    assert shares(conn, t) == {} and splits.needs_room_review(conn, t)
+    assert shares(conn, t) == {} and needs_room_review(conn, t)
 
 
 def test_vacant_share_to_house_saved_exactly(house):
     conn, ids = house
     t = add_tx(conn, "2026-07-01", -JULY)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t), None, [ids["House"]])
+    plan = rent.plan(conn, cat.get_transaction(conn, t), None, [ids["House"]])
     assert plan.error is None
     lines = {ln.name: (ln.room_cents, ln.vacant_cents) for ln in plan.lines}
     assert lines == {
@@ -103,14 +104,14 @@ def test_vacant_share_to_house_saved_exactly(house):
                                ids["Moana"]: 57141, ids["House"]: 260147}
     assert sum(shares(conn, t).values()) == JULY
     assert splits.get_split_source(conn, t) == splits.MANUAL
-    assert not splits.needs_room_review(conn, t)
+    assert not needs_room_review(conn, t)
     assert t not in [r["id"] for r in cat.list_transactions(conn, status=cat.REVIEW)]
 
 
 def test_vacant_share_split_among_people(house):
     conn, ids = house
     t = add_tx(conn, "2026-07-01", -JULY)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t), None, [ids["Ann"], ids["Bob"], ids["Cy"]])
+    plan = rent.plan(conn, cat.get_transaction(conn, t), None, [ids["Ann"], ids["Bob"], ids["Cy"]])
     vac = {ln.name: ln.vacant_cents for ln in plan.lines}
     assert sorted(vac.values()) == [0, 86715, 86716, 86716]  # 260147 / 3, leftover cents rotate
     assert sum(vac.values()) == 260147
@@ -123,7 +124,7 @@ def test_vacant_share_split_among_people(house):
 def test_refund_rent_signs(house):
     conn, ids = house
     t = add_tx(conn, "2026-07-02", 3100)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t), None, [ids["House"]])
+    plan = rent.plan(conn, cat.get_transaction(conn, t), None, [ids["House"]])
     assert sum(ln.total_cents for ln in plan.lines) == -3100
     cat.save_refund(conn, t, ids["Rent"], plan.weights)
     assert shares(conn, t) == {ln.person_id: ln.total_cents for ln in plan.lines if ln.total_cents}
@@ -133,7 +134,7 @@ def test_full_month_plan_is_default(house):
     conn, ids = house
     fill_july(conn, ids)
     t = add_tx(conn, "2026-07-01", -JULY)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t))
+    plan = rent.plan(conn, cat.get_transaction(conn, t))
     assert plan.error is None and not plan.needs_vacant_choice
     cat.save_withdrawal(conn, t, ids["Rent"], plan.weights)
     assert splits.get_split_source(conn, t) == splits.DEFAULT
@@ -145,11 +146,11 @@ def test_bad_percents_no_plan(house):
     with conn:
         conn.execute("UPDATE rooms SET percent = 39.999 WHERE id = ?", (ids["Front"],))
     t = add_tx(conn, "2026-07-01", -JULY)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t), None, [ids["House"]])
+    plan = rent.plan(conn, cat.get_transaction(conn, t), None, [ids["House"]])
     assert plan.lines == [] and plan.weights == []
     assert plan.error.startswith("Rent can't be split by rooms")
     with pytest.raises(ValueError):
-        cat.recalculate_rent(conn, t)
+        rent.recalculate(conn, t)
 
 
 def test_review_filter_rent(house):
@@ -157,7 +158,7 @@ def test_review_filter_rent(house):
     t = add_tx(conn, "2026-07-01", -JULY, ids["Rent"])
     splits.apply_default_split(conn, [t])
     assert [r["id"] for r in cat.list_transactions(conn, status=cat.REVIEW)] == [t]
-    cat.recalculate_rent(conn, t, [ids["House"]])
+    rent.recalculate(conn, t, [ids["House"]])
     assert cat.list_transactions(conn, status=cat.REVIEW) == []
 
 
@@ -166,13 +167,13 @@ def test_recalculate_compares_and_replaces(house):
     t = add_tx(conn, "2026-07-01", -JULY, ids["Rent"])
     splits.set_transaction_split(conn, t, [(ids["Ann"], 1), (ids["Bob"], 1)])
     fill_july(conn, ids)
-    plan = cat.rent_plan(conn, cat.get_transaction(conn, t))
-    rows = {n: (o, nw) for n, o, nw in cat.recalc_comparison(conn, t, plan)}
+    plan = rent.plan(conn, cat.get_transaction(conn, t))
+    rows = {n: (o, nw) for n, o, nw in rent.comparison(conn, t, plan)}
     assert rows["Ann"][1] == 629121
     assert rows["Ann"][0] + rows["Bob"][0] == JULY
     assert rows["Cy"][0] is None and rows["Moana"][0] is None
     assert shares(conn, t) == {ids["Ann"]: rows["Ann"][0], ids["Bob"]: rows["Bob"][0]}  # unchanged
-    cat.recalculate_rent(conn, t)
+    rent.recalculate(conn, t)
     assert shares(conn, t) == {ln.person_id: ln.total_cents for ln in plan.lines}
     assert splits.get_split_source(conn, t) == splits.DEFAULT
 
@@ -182,17 +183,17 @@ def test_recalculate_needs_vacant_choice(house):
     t = add_tx(conn, "2026-07-01", -JULY, ids["Rent"])
     splits.set_transaction_split(conn, t, [(ids["Ann"], 1)])
     with pytest.raises(ValueError, match="vacant share"):
-        cat.recalculate_rent(conn, t)
+        rent.recalculate(conn, t)
     assert shares(conn, t) == {ids["Ann"]: JULY}
-    cat.recalculate_rent(conn, t, [ids["Bob"]])
+    rent.recalculate(conn, t, [ids["Bob"]])
     assert shares(conn, t)[ids["Bob"]] == 524923 + 260147
 
 
 def test_recalculate_only_rent(house):
     conn, ids = house
-    t = add_tx(conn, "2026-07-01", -1000, db.get_purpose_id(conn, "Water"))
+    t = add_tx(conn, "2026-07-01", -1000, purpose_id(conn, "Water"))
     with pytest.raises(ValueError):
-        cat.recalculate_rent(conn, t)
+        rent.recalculate(conn, t)
 
 
 # --- page (AppTest) -------------------------------------------------------------------
@@ -248,7 +249,7 @@ def test_page_vacant_share_must_be_assigned(app_db):
     conn = db.connect(path)
     s = shares(conn, t)
     assert s[ids["House"]] == 260147 and sum(s.values()) == JULY
-    assert not splits.needs_room_review(conn, t)
+    assert not needs_room_review(conn, t)
     conn.close()
 
 

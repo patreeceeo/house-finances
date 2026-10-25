@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import ingest as cli
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import db, ingest, rules, splits
 
@@ -147,12 +147,11 @@ def test_crash_after_rules_commit_attempt_rolls_back(conn, tmp_path, monkeypatch
 def test_rules_and_default_split_applied_to_new_rows(conn, tmp_path):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
-    util = db.get_purpose_id(conn, "Water")
+    util = purpose_id(conn, "Water")
     splits.set_purpose_split(conn, util, [(a, 1), (b, 3)])
     rules.create_rule(conn, "EXAMPLE UTILITY", "withdrawal", purpose_id=util)
     r = ingest.ingest_file(conn, write_csv(tmp_path, "old.csv", OLDER))
     assert r.auto_categorized == 2  # utility + interest
-    assert r.splits_written == 1
     txn = conn.execute("SELECT * FROM transactions WHERE description = 'EXAMPLE UTILITY'").fetchone()
     assert txn["purpose_id"] == util and txn["category_source"] == "rule"
     shares = dict(conn.execute(

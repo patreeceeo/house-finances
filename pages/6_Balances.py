@@ -6,7 +6,7 @@ Paid in nets deposits from a person against withdrawals paid to them.
 import pandas as pd
 import streamlit as st
 
-from housefin import balances, matching_ui, ui
+from housefin import balances, fmt, matching_ui, ui
 
 st.set_page_config(page_title="Balances · House Finances", layout="wide")
 conn = ui.get_conn()
@@ -15,7 +15,7 @@ st.title("Balances")
 months = ui.month_selector(conn)
 st.caption(
     f"{ui.describe_months(months)}. Running balance is through the end of "
-    + (ui.format_month(months[-1]) if months else "all time")
+    + (fmt.month(months[-1]) if months else "all time")
     + "; positive is credit, negative is owed. Paid in is deposits minus withdrawals"
     " paid to the person. Transfers are left out."
 )
@@ -29,13 +29,13 @@ if count:
         parts.append(
             f"{n_other} {'are' if n_other != 1 else 'is'} uncategorized or "
             f"{'have' if n_other != 1 else 'has'} no split "
-            f"({ui.md_cents(-(total - rent_total))}): categorize "
+            f"({fmt.md_cents(-(total - rent_total))}): categorize "
             f"{'them' if n_other != 1 else 'it'} on the Categorize page."
         )
     if n_rent:
         parts.append(
             f"{n_rent} {'are rent payments' if n_rent != 1 else 'is a rent payment'} "
-            f"({ui.md_cents(-rent_total)}) for a month when a room was empty for "
+            f"({fmt.md_cents(-rent_total)}) for a month when a room was empty for "
             "some nights (or the room percents need fixing), so nobody has said who "
             "covers the empty room's share yet. Review "
             f"{'them' if n_rent != 1 else 'it'} on the Categorize page "
@@ -43,7 +43,7 @@ if count:
         )
     st.warning(
         f"{count} withdrawal{'s' if count != 1 else ''} totalling "
-        f"{ui.md_cents(-total)} in the selected months "
+        f"{fmt.md_cents(-total)} in the selected months "
         f"{'count' if count != 1 else 'counts'} toward no one's share yet. "
         + " ".join(parts)
     )
@@ -51,7 +51,7 @@ if count:
 count, total = balances.splits_pending_review(conn, months)
 if count:
     st.warning(
-        f"{count} split{'s' if count != 1 else ''} totalling {ui.md_cents(-total)} in the "
+        f"{count} split{'s' if count != 1 else ''} totalling {fmt.md_cents(-total)} in the "
         "selected months left out someone who wasn't in the house that month, so everyone else's "
         "share was scaled up. Nobody has confirmed "
         f"{'them' if count != 1 else 'it'} yet: review on the Categorize page (Show: Needs review)."
@@ -71,10 +71,10 @@ COLS = {
 table = pd.DataFrame(
     {
         "Person": [r.name + (" (moved out)" if r.moved_out else "") for r in rows],
-        "Paid in ($)": [ui.cents_to_dollars(r.paid_in_cents) for r in rows],
-        "Share of spending ($)": [ui.cents_to_dollars(r.share_cents) for r in rows],
-        "Net ($)": [ui.cents_to_dollars(r.net_cents) for r in rows],
-        "Running balance ($)": [ui.cents_to_dollars(r.running_cents) for r in rows],
+        "Paid in ($)": [fmt.dollars(r.paid_in_cents) for r in rows],
+        "Share of spending ($)": [fmt.dollars(r.share_cents) for r in rows],
+        "Net ($)": [fmt.dollars(r.net_cents) for r in rows],
+        "Running balance ($)": [fmt.dollars(r.running_cents) for r in rows],
     }
 )
 rows_by_id = {r.person_id: r for r in rows}
@@ -96,9 +96,9 @@ def _deposits_df(person_id, sel_months, through):
     return pd.DataFrame(
         {
             "Date": ui.to_dates(r["date"] for r in data),
-            "Month": [ui.format_month(r["month"]) for r in data],
+            "Month": [fmt.month(r["month"]) for r in data],
             "Description": [r["description"] for r in data],
-            "Amount ($)": [ui.cents_to_dollars(r["amount_cents"]) for r in data],
+            "Amount ($)": [fmt.dollars(r["amount_cents"]) for r in data],
         }
     )
 
@@ -108,11 +108,11 @@ def _shares_df(person_id, sel_months, through):
     return pd.DataFrame(
         {
             "Date": ui.to_dates(r["date"] for r in data),
-            "Month": [ui.format_month(r["month"]) for r in data],
+            "Month": [fmt.month(r["month"]) for r in data],
             "Description": [r["description"] for r in data],
             "Purpose": [r["purpose"] or "" for r in data],
-            "Amount ($)": [ui.cents_to_dollars(r["amount_cents"]) for r in data],
-            "Share ($)": [ui.cents_to_dollars(r["share_cents"]) for r in data],
+            "Amount ($)": [fmt.dollars(r["amount_cents"]) for r in data],
+            "Share ($)": [fmt.dollars(r["share_cents"]) for r in data],
         }
     )
 
@@ -143,7 +143,7 @@ if clicked is not None and clicked[1] in COLS:
     # Which months the clicked amount covers.
     if kind == "running":
         sel_months, through = None, (months[-1] if months else None)
-        period = "all time" + (f" through {ui.format_month(through)}" if through else "")
+        period = "all time" + (f" through {fmt.month(through)}" if through else "")
     else:
         sel_months, through = months, None
         period = ui.describe_months(months) if months else "all time"
@@ -162,7 +162,7 @@ st.subheader("Match deposits to shares")
 st.caption(
     "A person's shares of withdrawals next to their deposits, in groups that pay for "
     "each other. Range: all time through the end of "
-    + (ui.format_month(months[-1]) if months else "the latest month")
+    + (fmt.month(months[-1]) if months else "the latest month")
     + ", same as Running balance. Each group's difference is deposits minus shares, and the "
     "differences add up to the Running balance, so a balance that isn't zero points at the "
     "groups causing it. Suggested groups aren't saved until you keep or edit them."

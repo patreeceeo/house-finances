@@ -1,11 +1,10 @@
-import datetime as dt
 from pathlib import Path
 
 import pytest
 
-from helpers import move_in
+from helpers import house_id, move_in, purpose_id
 
-from housefin import db, people, rooms, ui
+from housefin import dates, db, fmt, people, rooms
 from housefin.people import PersonError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,33 +31,11 @@ def names(rows):
     return [r["name"] for r in rows]
 
 
-# --- months ---------------------------------------------------------------------
-
-
-def test_month_helpers():
-    assert people.add_months("2026-12", 1) == "2027-01"
-    assert people.add_months("2026-01", -1) == "2025-12"
-    assert people.month_range("2026-11", "2027-02") == ["2026-11", "2026-12", "2027-01", "2027-02"]
-    assert people.month_range("2026-05", "2026-04") == []
-    assert people.current_month(dt.date(2026, 10, 20)) == "2026-10"
-    assert people.check_month(None) is None
-    for bad in ("2026-13", "2026-1", "Oct 2026", ""):
-        with pytest.raises(PersonError):
-            people.check_month(bad)
-
-
-def test_month_choices(conn):
-    _tx(conn, 1, date="2020-06-01")
-    ms = people.month_choices(conn, today=dt.date(2026, 10, 20), extra=("2019-01", None))
-    assert ms[0] == "2027-10" and ms == sorted(ms, reverse=True)
-    assert "2020-06" in ms and "2019-01" in ms and "2026-10" in ms
-
-
 # --- add / rename -----------------------------------------------------------------
 
 
 def test_add_person_not_in_remembered_splits(conn):
-    rent = db.get_purpose_id(conn, "Rent")
+    rent = purpose_id(conn, "Rent")
     a = people.add_person(conn, "  Alice   Ash ")
     conn.execute("INSERT INTO purpose_splits (purpose_id, person_id, weight) VALUES (?, ?, 1)", (rent, a))
     b = people.add_person(conn, "Bob")
@@ -91,7 +68,7 @@ def test_rename_history_follows(conn):
 
 
 def test_house_renamable(conn):
-    house = db.get_house_id(conn)
+    house = house_id(conn)
     people.rename_person(conn, house, "Our House")
     assert people.get_person(conn, house)["name"] == "Our House"
     assert people.get_person(conn, house)["is_house"] == 1
@@ -113,8 +90,8 @@ def test_status_from_room_assignments(conn):
     rooms.add_assignment(conn, room, a, "2026-09-01")
     assert people.status(conn, a, "2026-07") == "Away"
     assert people.status(conn, a, "2027-03") == "In the house"
-    assert names(db.active_people(conn, "2026-06")) == []
-    assert names(db.active_people(conn, "2026-05")) == ["Alice"]
+    assert names(db.people_in_house(conn, "2026-06")) == []
+    assert names(db.people_in_house(conn, "2026-05")) == ["Alice"]
     # History stays listed.
     assert "Alice" in names(db.list_people(conn))
 
@@ -149,8 +126,8 @@ def test_not_in_a_room_list(conn):
 
 
 def test_house_cannot_be_deleted(conn):
-    house = db.get_house_id(conn)
-    assert not people.can_delete(conn, house)
+    house = house_id(conn)
+    assert people.delete_blocker(conn, house)
     with pytest.raises(PersonError):
         people.delete_person(conn, house)
     assert people.status(conn, house, "2026-05") == "House"
@@ -160,7 +137,7 @@ def test_house_cannot_be_deleted(conn):
 
 
 def test_delete_unused_person(conn):
-    rent = db.get_purpose_id(conn, "Rent")
+    rent = purpose_id(conn, "Rent")
     a = people.add_person(conn, "Alice")
     b = people.add_person(conn, "Bob")
     conn.executemany(
@@ -168,7 +145,7 @@ def test_delete_unused_person(conn):
         [(rent, a, 1), (rent, b, 2)],
     )
     conn.commit()
-    assert people.can_delete(conn, a)
+    assert people.delete_blocker(conn, a) is None
     people.delete_person(conn, a)
     assert "Alice" not in names(db.list_people(conn))
     left = conn.execute("SELECT person_id, weight FROM purpose_splits").fetchall()
@@ -178,7 +155,7 @@ def test_delete_unused_person(conn):
 def test_delete_blocked_by_tagged_transaction(conn):
     a = people.add_person(conn, "Alice")
     _tx(conn, 1, amount=500, person_id=a)
-    assert not people.can_delete(conn, a)
+    assert people.delete_blocker(conn, a)
     assert "1 transaction" in people.delete_blocker(conn, a)
     with pytest.raises(PersonError):
         people.delete_person(conn, a)
@@ -192,7 +169,7 @@ def test_delete_blocked_by_split(conn):
         (tx, a),
     )
     conn.commit()
-    assert not people.can_delete(conn, a)
+    assert people.delete_blocker(conn, a)
 
 
 def test_delete_blocked_by_rule(conn):
@@ -243,7 +220,7 @@ def test_page_lists_people(app_db):
     at = _app()
     assert not at.exception, at.exception
     df = at.dataframe[0].value
-    status = f"Status in {ui.format_month(people.current_month())}"
+    status = f"Status in {fmt.month(dates.current_month())}"
     assert list(df.columns[:4]) == ["Name", "Color", status, "Room now"]
     assert list(df["Name"]) == ["House", "Alice", "Bob"]
     assert list(df[status]) == ["House", "In the house", "Not in a room"]
@@ -260,21 +237,21 @@ def test_page_lists_people(app_db):
 
 
 def test_page_status_away_moved_out_not_yet_arrived(app_db):
-    now = people.current_month()
+    now = dates.current_month()
     c = db.connect(app_db)
     for name, start, end in (
-        ("Gone", "2020-01", people.add_months(now, -2)),
-        ("Later", people.add_months(now, 2), None),
+        ("Gone", "2020-01", dates.add_months(now, -2)),
+        ("Later", dates.add_months(now, 2), None),
     ):
         move_in(c, people.add_person(c, name), start, end)
     away = people.add_person(c, "Traveller")
-    move_in(c, away, "2020-01", people.add_months(now, -1))
-    move_in(c, away, people.add_months(now, 1), None)
+    move_in(c, away, "2020-01", dates.add_months(now, -1))
+    move_in(c, away, dates.add_months(now, 1), None)
     c.close()
     at = _app()
     assert not at.exception, at.exception
     df = at.dataframe[0].value
-    status = dict(zip(df["Name"], df[f"Status in {ui.format_month(now)}"]))
+    status = dict(zip(df["Name"], df[f"Status in {fmt.month(now)}"]))
     assert status["Gone"] == "Moved out"
     assert status["Later"] == "Not yet arrived"
     assert status["Traveller"] == "Away"

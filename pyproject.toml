@@ -2,7 +2,7 @@
 name = "house-finances"
 version = "0.1.0"
 description = "Local categorizer, reports and Splitwise-style balances for a shared house bank account"
-readme = "AGENTS.md"
+readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "babel>=2.18.0",

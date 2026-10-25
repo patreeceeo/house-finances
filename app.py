@@ -1,12 +1,9 @@
-"""House Finances: Streamlit entry point.  Run with `uv run streamlit run app.py`.
-
-Pages live in pages/ and are picked up by Streamlit's multipage navigation.
-The database is finances.db at the repo root, or the path in env HOUSEFIN_DB.
-"""
+"""Home page. Run with `uv run streamlit run app.py`; the screens in pages/
+are picked up by Streamlit's multipage navigation."""
 
 import streamlit as st
 
-from housefin import ui
+from housefin import fmt, ui
 
 st.set_page_config(page_title="House Finances", page_icon=":house:", layout="wide")
 
@@ -35,7 +32,7 @@ else:
     c2.metric("Deposits / withdrawals", f"{stats['deposits'] or 0:,} / {stats['withdrawals'] or 0:,}")
     c3.metric("Uncategorized", f"{stats['uncategorized'] or 0:,}")
     c4.metric("Imports", f"{imports:,}")
-    st.write(f"Dates: **{ui.format_date(stats['first'])}** to **{ui.format_date(stats['last'])}**")
+    st.write(f"Dates: **{fmt.date(stats['first'])}** to **{fmt.date(stats['last'])}**")
     if stats["uncategorized"]:
         st.page_link("pages/1_Categorize.py", label="Categorize uncategorized transactions", icon=":material/label:")
 
@@ -50,8 +47,9 @@ st.subheader("Pages")
 st.markdown(
     "- **Categorize**: tag new transactions with a person or purpose\n"
     "- **Rules**: remembered descriptions and what they map to\n"
-    "- **People**: housemates, move-in and move-out months\n"
+    "- **People**: housemates, their colors and whether they're in the house\n"
     "- **Purposes**: spending categories and their default splits\n"
-    "- **Reports**: totals by person and purpose, with CSV export\n"
-    "- **Balances**: who is ahead and who is behind"
+    "- **Reports**: totals by person and purpose, monthly averages, CSV export\n"
+    "- **Balances**: who is ahead and who is behind, and which payments explain it\n"
+    "- **Rooms**: each room's share of the rent and who slept in it when"
 )

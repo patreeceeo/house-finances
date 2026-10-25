@@ -27,12 +27,10 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 
-from housefin import matching, ui
+from housefin import fmt, matching, ui
 from housefin.matching import Group, Item
 
 STALE = "The groups changed since the page was drawn; nothing was saved."
-
-ACTIONS = ("keep", "keep_all_balanced", "move", "split", "merge", "note", "unkeep")
 
 
 # --- serialization (no Streamlit) ----------------------------------------------------
@@ -43,11 +41,6 @@ def tone(cents: int) -> str:
     return "owed" if cents < 0 else "credit" if cents > 0 else "balanced"
 
 
-def signed_cents(cents: int) -> str:
-    """'+$1.00', '-$1.00', '$0.00'."""
-    return ("+" if cents > 0 else "") + ui.format_cents(cents)
-
-
 def group_title(group: Group, locale: str | None = None) -> str:
     """'Oct 2026', 'Sep 2026 – Oct 2026' (first and last share month), or
     'Paid ahead' for a group with no shares."""
@@ -55,8 +48,8 @@ def group_title(group: Group, locale: str | None = None) -> str:
     if not m:
         return "Paid ahead"
     if len(m) == 1:
-        return ui.format_month(m[0], locale)
-    return f"{ui.format_month(m[0], locale)} – {ui.format_month(m[-1], locale)}"
+        return fmt.month(m[0], locale)
+    return f"{fmt.month(m[0], locale)} – {fmt.month(m[-1], locale)}"
 
 
 def item_key(item: Item) -> str:
@@ -70,17 +63,17 @@ def item_data(item: Item, locale: str | None = None) -> dict:
     if item.side == matching.SHARE:
         what = (item.purpose or item.description) + (" refund" if item.cents < 0 else "")
         detail = item.description if item.purpose else ""
-        of = f"of {ui.format_cents(-item.amount_cents)}"
+        of = f"of {fmt.cents(-item.amount_cents)}"
     else:
         what, detail, of = item.description, "", ""
     return {
         "key": item_key(item),
         "tid": item.transaction_id,
         "side": item.side,
-        "date": ui.format_date(item.date, locale),
+        "date": fmt.date(item.date, locale),
         "what": what,
         "detail": detail,
-        "amount": ui.format_cents(item.cents),
+        "amount": fmt.cents(item.cents),
         "of": of,
         "cents": item.cents,
     }
@@ -102,8 +95,8 @@ def group_data(groups: Sequence[Group], locale: str | None = None) -> list[dict]
         changed = None
         if g.changed_since_kept:
             changed = (
-                f"Changed since kept: deposits were {ui.format_cents(g.kept_paid_cents)}, "
-                f"shares were {ui.format_cents(g.kept_share_cents)}"
+                f"Changed since kept: deposits were {fmt.cents(g.kept_paid_cents)}, "
+                f"shares were {fmt.cents(g.kept_share_cents)}"
             )
         later = None
         if g.later_items:
@@ -121,16 +114,16 @@ def group_data(groups: Sequence[Group], locale: str | None = None) -> list[dict]
             "paid_cents": g.paid_cents,
             "share_cents": g.share_cents,
             "diff_cents": diff,
-            "paid": ui.format_cents(g.paid_cents),
-            "shares_total": ui.format_cents(g.share_cents),
-            "shares_neg": ui.format_cents(-g.share_cents),
-            "diff": signed_cents(diff),
+            "paid": fmt.cents(g.paid_cents),
+            "shares_total": fmt.cents(g.share_cents),
+            "shares_neg": fmt.cents(-g.share_cents),
+            "diff": fmt.signed_cents(diff),
             "tone": tone(diff),
             "counts": counts,
-            "summary": f"{counts} · {ui.format_cents(g.share_cents)} · balanced",
+            "summary": f"{counts} · {fmt.cents(g.share_cents)} · balanced",
             "changed": changed,
             "later": later,
-            "option": f"{title}{'' if g.kept else ' (suggested)'} · {signed_cents(diff)}",
+            "option": f"{title}{'' if g.kept else ' (suggested)'} · {fmt.signed_cents(diff)}",
             "next": groups[n + 1].key if n + 1 < len(groups) else None,
             "share_items": [item_data(i, locale) for i in shares],
             "paid_items": [item_data(i, locale) for i in paid],
@@ -146,14 +139,14 @@ def equation_data(
     total = sum(g.difference_cents for g in groups)
     return {
         "terms": [
-            {"label": group_title(g, locale), "text": ui.format_cents(g.difference_cents),
+            {"label": group_title(g, locale), "text": fmt.cents(g.difference_cents),
              "tone": tone(g.difference_cents)}
             for g in groups if g.difference_cents
         ],
         "balanced": sum(1 for g in groups if not g.difference_cents),
-        "total": ui.format_cents(total),
+        "total": fmt.cents(total),
         "total_tone": tone(total),
-        "running": ui.format_cents(running_cents),
+        "running": fmt.cents(running_cents),
         "ok": total == running_cents,
     }
 
@@ -173,7 +166,7 @@ def component_data(
         "person": person_id,
         "last_event": last_event,
         "name": name,
-        "running": ui.format_cents(running_cents),
+        "running": fmt.cents(running_cents),
         "running_tone": tone(running_cents),
         "equation": equation_data(groups, running_cents, locale),
         "groups": group_data(groups, locale),
@@ -628,7 +621,7 @@ def _edit_callback(
             return
         message = apply_edit(conn, person_id, months, event)
         if message:
-            st.session_state[f"_{key}_flash"] = message
+            ui.flash(key, message, "warning")
 
     return on_edit
 
@@ -646,17 +639,15 @@ def show(
     Running balance."""
     import streamlit as st
 
-    message = st.session_state.pop(f"_{key}_flash", None)
-    if message:
-        st.warning(message)
+    ui.show_flash(key)
     months = list(months or ())
     groups = matching.groups_for(conn, person_id, months)
     check = matching.check_groups(conn, person_id, months, groups)
     if not check.ok:
         st.error(
-            f"The groups' differences add up to {ui.md_cents(check.groups_cents)}, but "
-            f"{name}'s Running balance is {ui.md_cents(check.running_cents)} (off by "
-            f"{ui.md_cents(check.off_by_cents)}). This is a bug in the matching code, so the "
+            f"The groups' differences add up to {fmt.md_cents(check.groups_cents)}, but "
+            f"{name}'s Running balance is {fmt.md_cents(check.running_cents)} (off by "
+            f"{fmt.md_cents(check.off_by_cents)}). This is a bug in the matching code, so the "
             "groups aren't shown.",
             title="Groups don't add up to the Running balance",
         )

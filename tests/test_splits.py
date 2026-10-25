@@ -1,6 +1,6 @@
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, house_id, purpose_id
 
 from housefin import db, splits
 from housefin.splits import compute_shares
@@ -108,7 +108,7 @@ def test_even_split_fallback_respects_active_months(conn):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob", "2026-09")
     c = add_resident(conn, "Cara", end="2026-09")
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     assert splits.default_split_for(conn, rent, "2026-08") == [(a, 1.0), (c, 1.0)]
     assert splits.default_split_for(conn, rent, "2026-09") == [(a, 1.0), (b, 1.0), (c, 1.0)]
     assert splits.default_split_for(conn, rent, "2026-10") == [(a, 1.0), (b, 1.0)]
@@ -118,8 +118,8 @@ def test_default_drops_moved_out_people_others_keep_weights(conn):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
     c = add_resident(conn, "Cara", end="2026-09")
-    house = db.get_house_id(conn)
-    rent = db.get_purpose_id(conn, "Internet")
+    house = house_id(conn)
+    rent = purpose_id(conn, "Internet")
     splits.set_purpose_split(conn, rent, [(a, 35), (b, 35), (c, 30), (house, 5)])
     assert dict(splits.default_split_for(conn, rent, "2026-09")) == {a: 35, b: 35, c: 30, house: 5}
     assert dict(splits.default_split_for(conn, rent, "2026-10")) == {a: 35, b: 35, house: 5}
@@ -128,14 +128,14 @@ def test_default_drops_moved_out_people_others_keep_weights(conn):
 def test_default_with_nobody_active_falls_back_to_even(conn):
     a = add_resident(conn, "Alice")
     c = add_resident(conn, "Cara", end="2026-09")
-    water = db.get_purpose_id(conn, "Water")
+    water = purpose_id(conn, "Water")
     splits.set_purpose_split(conn, water, [(c, 1)])
     assert splits.default_split_for(conn, water, "2026-10") == [(a, 1.0)]
 
 
 def test_transfer_has_no_default(conn):
     add_resident(conn, "Alice")
-    assert splits.default_split_for(conn, db.get_transfer_purpose_id(conn), "2026-10") == []
+    assert splits.default_split_for(conn, purpose_id(conn, "Transfer"), "2026-10") == []
 
 
 # --- transaction splits ----------------------------------------------------------
@@ -143,7 +143,7 @@ def test_transfer_has_no_default(conn):
 
 def test_set_split_and_remember_for_purpose(conn):
     m, d, p = (add_resident(conn, n) for n in ("Moana", "David", "Patrick"))
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     t1 = _txn(conn, -400000, purpose_id=rent)
     splits.set_transaction_split(conn, t1, [(m, 35), (d, 35), (p, 30)], remember_for_purpose=True)
     assert _shares(conn, t1) == {m: 140000, d: 140000, p: 120000}
@@ -164,7 +164,7 @@ def test_set_split_and_remember_for_purpose(conn):
 
 def test_set_split_without_remember_leaves_default(conn):
     a = add_resident(conn, "Alice")
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     t = _txn(conn, -1000, purpose_id=rent)
     splits.set_transaction_split(conn, t, [(a, 1)])
     assert splits.get_purpose_split(conn, rent) == []
@@ -173,7 +173,7 @@ def test_set_split_without_remember_leaves_default(conn):
 def test_refund_produces_negative_shares(conn):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
-    costco = db.get_purpose_id(conn, "Costco")
+    costco = purpose_id(conn, "Costco")
     refund = _txn(conn, 2501, purpose_id=costco)
     splits.apply_default_split(conn, [refund])
     shares = _shares(conn, refund)
@@ -186,7 +186,7 @@ def test_refund_produces_negative_shares(conn):
 def test_apply_default_uses_applies_month(conn):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob", "2026-11")
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     t = _txn(conn, -1000, date="2026-10-30", purpose_id=rent, applies_month="2026-11")
     splits.apply_default_split(conn, [t])
     assert _shares(conn, t) == {a: 500, b: 500}
@@ -195,11 +195,11 @@ def test_apply_default_uses_applies_month(conn):
 def test_apply_default_skips_manual_and_unpurposed_and_clears_transfer(conn):
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     manual = _txn(conn, -1000, purpose_id=rent)
     splits.set_transaction_split(conn, manual, [(a, 1)])
     none = _txn(conn, -1000)
-    transfer = _txn(conn, -1000, purpose_id=db.get_transfer_purpose_id(conn))
+    transfer = _txn(conn, -1000, purpose_id=purpose_id(conn, "Transfer"))
     with conn:
         conn.execute(
             "INSERT INTO splits VALUES (?, ?, 1, 1000)", (transfer, a)
@@ -215,35 +215,11 @@ def test_apply_default_skips_manual_and_unpurposed_and_clears_transfer(conn):
 
 def test_house_can_be_in_split(conn):
     a = add_resident(conn, "Alice")
-    house = db.get_house_id(conn)
-    other = db.get_purpose_id(conn, "Other")
+    house = house_id(conn)
+    other = purpose_id(conn, "Other")
     t = _txn(conn, -300, purpose_id=other)
     splits.set_transaction_split(conn, t, [(a, 2), (house, 1)])
     assert _shares(conn, t) == {a: 200, house: 100}
-
-
-# --- totals --------------------------------------------------------------------------
-
-
-def test_share_totals(conn):
-    a = add_resident(conn, "Alice")
-    b = add_resident(conn, "Bob")
-    rent = db.get_purpose_id(conn, "Internet")
-    transfer = db.get_transfer_purpose_id(conn)
-    t_sep = _txn(conn, -1000, date="2026-09-03", purpose_id=rent)
-    t_oct = _txn(conn, -2000, date="2026-10-03", purpose_id=rent)
-    t_nov = _txn(conn, -4000, date="2026-10-31", purpose_id=rent, applies_month="2026-11")
-    refund = _txn(conn, 600, date="2026-10-10", purpose_id=rent)
-    splits.apply_default_split(conn, [t_sep, t_oct, t_nov, refund])
-    t_tr = _txn(conn, -9999, purpose_id=transfer)
-    with conn:  # even if a Transfer somehow has split rows, totals ignore it
-        conn.execute("INSERT INTO splits VALUES (?, ?, 1, 9999)", (t_tr, a))
-
-    assert splits.share_totals(conn) == {a: 3200, b: 3200}
-    assert splits.share_totals(conn, ["2026-10"]) == {a: 700, b: 700}
-    assert splits.share_totals(conn, ["2026-09", "2026-11"]) == {a: 2500, b: 2500}
-    assert splits.share_totals(conn, through="2026-10") == {a: 1200, b: 1200}
-    assert splits.share_totals(conn, []) == {}
 
 
 def test_to_percents_sums_to_exactly_100():
@@ -281,9 +257,9 @@ def test_sync_after_rules_recomputes_clears_and_skips_excluded(conn):
 
     a = add_resident(conn, "Alice")
     b = add_resident(conn, "Bob")
-    rent = db.get_purpose_id(conn, "Internet")
-    costco = db.get_purpose_id(conn, "Costco")
-    transfer = db.get_transfer_purpose_id(conn)
+    rent = purpose_id(conn, "Internet")
+    costco = purpose_id(conn, "Costco")
+    transfer = purpose_id(conn, "Transfer")
     splits.set_purpose_split(conn, rent, [(a, 75), (b, 25)])
 
     # Each starts with a stale split, then a "rule" changes its purpose.
@@ -310,7 +286,7 @@ def test_sync_after_rules_recomputes_clears_and_skips_excluded(conn):
 
 def test_sync_after_rules_accepts_ids_and_empty(conn):
     a = add_resident(conn, "Alice")
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     t = _txn(conn, -500, purpose_id=rent)
     assert splits.sync_after_rules(conn, []) == 0
     assert _shares(conn, t) == {}
@@ -320,7 +296,7 @@ def test_sync_after_rules_accepts_ids_and_empty(conn):
 
 def test_sync_after_rules_joins_caller_transaction(conn):
     a = add_resident(conn, "Alice")
-    rent = db.get_purpose_id(conn, "Internet")
+    rent = purpose_id(conn, "Internet")
     t = _txn(conn, -500, purpose_id=rent)
     with pytest.raises(RuntimeError):
         with db.transaction(conn):

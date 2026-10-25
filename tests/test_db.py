@@ -2,7 +2,7 @@ import re
 import sqlite3
 
 import pytest
-from helpers import add_resident
+from helpers import add_resident, house_id
 
 from housefin import db, people, rooms
 
@@ -57,7 +57,7 @@ def test_seeds_house(conn):
     houses = conn.execute("SELECT * FROM people WHERE is_house = 1").fetchall()
     assert len(houses) == 1
     assert houses[0]["name"] == "House"
-    assert db.get_house_id(conn) == houses[0]["id"]
+    assert house_id(conn) == houses[0]["id"]
 
 
 def test_seeds_purposes(conn):
@@ -125,7 +125,7 @@ def test_check_constraints(conn):
 def test_splits_cascade_with_transaction(conn):
     tid = _add_txn(conn)
     conn.execute(
-        "INSERT INTO splits VALUES (?, ?, 1, -100)", (tid, db.get_house_id(conn))
+        "INSERT INTO splits VALUES (?, ?, 1, -100)", (tid, house_id(conn))
     )
     conn.execute("DELETE FROM transactions WHERE id = ?", (tid,))
     assert conn.execute("SELECT COUNT(*) FROM splits").fetchone()[0] == 0
@@ -140,7 +140,7 @@ def test_active_people_come_from_room_assignments(conn):
     db.add_person(conn, "Cara")  # no room: not in the house
 
     def names(month, **kw):
-        return [r["name"] for r in db.active_people(conn, month, **kw)]
+        return [r["name"] for r in db.people_in_house(conn, month, **kw)]
 
     assert names("2025-12") == []
     assert names("2026-02") == ["Alice"]
@@ -155,11 +155,11 @@ def test_is_active_matches_query(conn):
     bob = db.add_person(conn, "Bob")
     rooms.add_assignment(conn, rooms.add_room(conn, "Back", 10), bob, "2026-03-15", "2026-05-02")
     row = db.get_person_by_name(conn, "Bob")
-    assert not db.is_active(conn, row, "2026-02")
-    assert db.is_active(conn, row, "2026-03")
-    assert db.is_active(conn, bob, "2026-05")
-    assert not db.is_active(conn, bob, "2026-06")
-    assert db.is_active(conn, db.get_house_id(conn), "1999-01")  # the House always is
+    assert not db.in_house(conn, row, "2026-02")
+    assert db.in_house(conn, row, "2026-03")
+    assert db.in_house(conn, bob, "2026-05")
+    assert not db.in_house(conn, bob, "2026-06")
+    assert db.in_house(conn, house_id(conn), "1999-01")  # the House always is
 
 
 def test_add_person_gets_distinct_color(conn):
@@ -180,13 +180,9 @@ def test_list_people(conn):
 def test_purpose_lookups(conn):
     rent = db.get_purpose(conn, "Rent")
     assert rent is not None and rent["excluded"] == 0
-    assert db.get_purpose_id(conn, "Rent") == rent["id"]
     assert db.get_purpose(conn, "Nope") is None
-    with pytest.raises(KeyError):
-        db.get_purpose_id(conn, "Nope")
-    assert db.get_transfer_purpose_id(conn) == db.get_purpose(conn, "Transfer")["id"]
     new_id = db.add_purpose(conn, "Gardening")
-    assert db.get_purpose_id(conn, "Gardening") == new_id
+    assert db.get_purpose(conn, "Gardening")["id"] == new_id
 
 
 # --- v5: rooms ------------------------------------------------------------------
@@ -361,8 +357,8 @@ def test_v6_seeds_rooms_from_rent_split_and_active_months(tmp_path):
     assert [(r["name"], r["active_from"], r["active_until"]) for r in people.not_in_a_room(conn)] == [
         ("John", None, "2026-02"), ("Zed", None, None),
     ]
-    assert [p["name"] for p in db.active_people(conn, "2026-02")] == ["Ann", "Bob"]
-    assert [p["name"] for p in db.active_people(conn, "2026-07")] == ["Ann", "Moana"]
+    assert [p["name"] for p in db.people_in_house(conn, "2026-02")] == ["Ann", "Bob"]
+    assert [p["name"] for p in db.people_in_house(conn, "2026-07")] == ["Ann", "Moana"]
     # Placing someone takes them off the list.
     rooms.add_assignment(conn, rooms.add_room(conn, "Attic", 1), ids["John"], "2026-01-01")
     assert [r["name"] for r in people.not_in_a_room(conn)] == ["Zed"]

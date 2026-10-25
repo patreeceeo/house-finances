@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from housefin import categorize, db, rules, splits, ui
+from housefin import categorize, dates, db, fmt, rent, rules, splits, ui
 
 st.set_page_config(page_title="Categorize · House Finances", layout="wide")
 conn = ui.get_conn()
@@ -22,8 +22,7 @@ NEW = -1  # selectbox option: add a new person/purpose inline
 months = ui.month_selector(conn)
 
 st.title("Categorize")
-if flash := ss.pop("_cat_flash", None):
-    st.success(flash)
+ui.show_flash("categorize")
 
 # --- filters -----------------------------------------------------------------
 
@@ -72,7 +71,7 @@ def tag_label(r) -> str:
 def row_label(tid: int) -> str:
     r = by_id[tid]
     desc = r["description"] if len(r["description"]) <= 60 else r["description"][:57] + "..."
-    return f"{ui.format_date(r['date'])} · {ui.format_cents(r['amount_cents'])} · {desc}"
+    return f"{fmt.date(r['date'])} · {fmt.cents(r['amount_cents'])} · {desc}"
 
 
 # --- table -------------------------------------------------------------------
@@ -92,11 +91,11 @@ st.dataframe(
     [
         {
             "Date": ui.to_dates([r["date"]])[0],
-            "Amount": ui.cents_to_dollars(r["amount_cents"]),
+            "Amount": fmt.dollars(r["amount_cents"]),
             "Description": r["description"],
             "Person / purpose": tag_label(r),
             "Source": r["category_source"] or "",
-            "Applies to": ui.format_month(r["applies_month"]) if r["applies_month"] else "",
+            "Applies to": fmt.month(r["applies_month"]) if r["applies_month"] else "",
             "Review": "Needs review" if r["needs_review"] else "",
         }
         for r in rows
@@ -124,14 +123,8 @@ tid = st.selectbox("Transaction", ids, format_func=row_label, key="cat_selected"
 txn = categorize.get_transaction(conn, tid)
 amount = txn["amount_cents"]
 is_deposit = amount > 0
-month = splits.transaction_month(txn)
+month = dates.month_of(txn)
 k = f"cat_{tid}"
-
-
-def shift_month(m: str, delta: int) -> str:
-    y, mo = map(int, m.split("-"))
-    idx = y * 12 + (mo - 1) + delta
-    return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
 
 
 def pick_name(rows_, current_id, placeholder, new_label, *, key, extra_label=None):
@@ -149,24 +142,24 @@ def pick_name(rows_, current_id, placeholder, new_label, *, key, extra_label=Non
 
 
 with st.container(border=True):
-    st.subheader(f"{ui.format_date(txn['date'])} · {ui.md_cents(amount)}")
+    st.subheader(f"{fmt.date(txn['date'])} · {fmt.md_cents(amount)}")
     st.code(txn["description"], language=None)
     source = {"rule": "tagged by a rule", "manual": "tagged by hand"}.get(
         txn["category_source"], "uncategorized"
     )
     st.caption(f"{txn['type']} · {source}")
 
-    # Applies-to-month override (spec open question 5).
+    # Applies-to-month override.
     date_month = txn["date"][:7]
-    month_opts = ["", shift_month(date_month, -1), shift_month(date_month, 1)]
+    month_opts = ["", dates.add_months(date_month, -1), dates.add_months(date_month, 1)]
     if txn["applies_month"] and txn["applies_month"] not in month_opts:
         month_opts.append(txn["applies_month"])
     applies = st.selectbox(
         "Applies to month",
         month_opts,
         index=month_opts.index(txn["applies_month"] or ""),
-        format_func=lambda m: f"Transaction date ({ui.format_month(date_month)})"
-        if not m else ui.format_month(m),
+        format_func=lambda m: f"Transaction date ({fmt.month(date_month)})"
+        if not m else fmt.month(m),
         key=f"{k}_applies",
         help="Counts the transaction toward another month, e.g. next month's rent paid early.",
     )
@@ -197,7 +190,7 @@ with st.container(border=True):
     purpose_row = None
 
     if to_person:
-        # Active people first; others (moved out / not yet in) after, marked,
+        # People in the house first; others (moved out / not yet in) after, marked,
         # so a moved-out person can still be credited for paying back.
         everyone = db.list_people(conn)
         in_house = db.in_house_ids(conn, month)
@@ -211,7 +204,7 @@ with st.container(border=True):
             "Person",
             "+ Add a new person...",
             key=f"{k}_person",
-            extra_label=lambda i, n: f"{n} (not active {ui.format_month(month)})"
+            extra_label=lambda i, n: f"{n} (not active {fmt.month(month)})"
             if i in inactive_ids else n,
         )
         if person_id == NEW:
@@ -241,17 +234,17 @@ with st.container(border=True):
                 # rooms" replaces it only after the user sees old vs new.
                 left_out = categorize.left_out_for_editor(conn, fake, purpose_id)
                 if left_out:
-                    who = ", ".join(f"{n} ({ui.format_percent(p)})" for n, p in left_out)
+                    who = ", ".join(f"{n} ({fmt.percent(p)})" for n, p in left_out)
                     st.warning(
                         f"Needs review: this split was written from the old {purpose_row['name']} "
-                        f"default, which left out {who} (not active in {ui.format_month(month)}), "
+                        f"default, which left out {who} (not active in {fmt.month(month)}), "
                         "so everyone else's share was scaled up. Saving confirms it as shown; "
                         "or recalculate it from rooms below."
                     )
                 origin = categorize.split_origin(conn, fake, purpose_id)
                 st.markdown("**Split** (stored)")
                 st.dataframe(
-                    [{"Person": r["name"], "Share": ui.format_cents(r["share_cents"])}
+                    [{"Person": r["name"], "Share": fmt.cents(r["share_cents"])}
                      for r in stored],
                     hide_index=True,
                 )
@@ -275,7 +268,7 @@ with st.container(border=True):
                 else:
                     with st.container(border=True):
                         st.markdown("**Recalculate from rooms**")
-                        recalc_plan = categorize.rent_plan(
+                        recalc_plan = rent.plan(
                             conn, txn, None, ss.get(f"{k}_recalc_vacant", [])
                         )
                         rs = recalc_plan.split
@@ -286,7 +279,7 @@ with st.container(border=True):
                             cand = categorize.split_candidates(conn, month)
                             names = {p["id"]: p["name"] for p in cand}
                             st.multiselect(
-                                f"Vacant share ({ui.md_cents(rs.vacant_cents)}) goes to",
+                                f"Vacant share ({fmt.md_cents(rs.vacant_cents)}) goes to",
                                 list(names), format_func=names.get,
                                 key=f"{k}_recalc_vacant",
                                 placeholder="Choose the House or people",
@@ -295,10 +288,10 @@ with st.container(border=True):
                             st.dataframe(
                                 [
                                     {"Person": n,
-                                     "Old share": ui.format_cents(o) if o is not None else "—",
-                                     "New share": ui.format_cents(nw) if nw is not None else "—",
-                                     "Change": ui.format_cents((nw or 0) - (o or 0))}
-                                    for n, o, nw in categorize.recalc_comparison(
+                                     "Old share": fmt.cents(o) if o is not None else "—",
+                                     "New share": fmt.cents(nw) if nw is not None else "—",
+                                     "Change": fmt.cents((nw or 0) - (o or 0))}
+                                    for n, o, nw in rent.comparison(
                                         conn, tid, recalc_plan)
                                 ],
                                 hide_index=True,
@@ -315,9 +308,9 @@ with st.container(border=True):
                             st.rerun()
             else:
                 vacant_to = ss.get(f"{k}_vacant_{month}", [])
-                plan = categorize.rent_plan(conn, fake, month, vacant_to)
+                plan = rent.plan(conn, fake, month, vacant_to)
                 rs = plan.split
-                st.markdown(f"**Split by rooms** ({ui.format_month(month)})")
+                st.markdown(f"**Split by rooms** ({fmt.month(month)})")
                 if rs.error is not None:
                     st.error(
                         rs.warnings()[0] + " Fix the room percents on the Rooms page; "
@@ -327,26 +320,26 @@ with st.container(border=True):
                 else:
                     table = [
                         {"Person": p.name, "Room": p.room, "Nights": str(p.nights),
-                         "Weight": categorize.weight_text(p.weight),
-                         "Share": ui.format_cents(p.share_cents)}
+                         "Weight": fmt.weight(p.weight),
+                         "Share": fmt.cents(p.share_cents)}
                         for p in rs.people
                     ] + [
                         {"Person": "Vacant", "Room": v.room,
-                         "Nights": f"{v.nights} ({categorize.span_text(v.first, v.last)})",
-                         "Weight": categorize.weight_text(v.weight),
-                         "Share": ui.format_cents(v.amount_cents)}
+                         "Nights": f"{v.nights} ({fmt.day_span(v.first, v.last)})",
+                         "Weight": fmt.weight(v.weight),
+                         "Share": fmt.cents(v.amount_cents)}
                         for v in rs.vacant
                     ]
                     if table:
                         st.dataframe(table, hide_index=True)
                     st.caption(
                         f"Weight = room percent × nights; all weights total "
-                        f"{categorize.weight_text(rs.total_weight)} (100 × {rs.days_in_month} days)."
+                        f"{fmt.weight(rs.total_weight)} (100 × {rs.days_in_month} days)."
                     )
                     if plan.needs_vacant_choice:
                         st.warning(
                             "Needs review: " + "; ".join(rs.warnings()) + ". The vacant share "
-                            f"({ui.md_cents(rs.vacant_cents)}) is in nobody's split yet. "
+                            f"({fmt.md_cents(rs.vacant_cents)}) is in nobody's split yet. "
                             "Choose who covers it before saving; nobody else's share is scaled up."
                         )
                         cand = categorize.split_candidates(
@@ -354,7 +347,7 @@ with st.container(border=True):
                         )
                         names = {p["id"]: p["name"] for p in cand}
                         st.multiselect(
-                            f"Vacant share ({ui.md_cents(rs.vacant_cents)}) goes to",
+                            f"Vacant share ({fmt.md_cents(rs.vacant_cents)}) goes to",
                             list(names), format_func=names.get, key=f"{k}_vacant_{month}",
                             placeholder="Choose the House or people",
                             help="Several people split it evenly (whole cents; leftover "
@@ -365,15 +358,15 @@ with st.container(border=True):
                             st.dataframe(
                                 [
                                     {"Person": ln.name,
-                                     "Room share": ui.format_cents(ln.room_cents),
-                                     "Vacant share": ui.format_cents(ln.vacant_cents),
-                                     "Total": ui.format_cents(ln.total_cents)}
+                                     "Room share": fmt.cents(ln.room_cents),
+                                     "Vacant share": fmt.cents(ln.vacant_cents),
+                                     "Total": fmt.cents(ln.total_cents)}
                                     for ln in plan.lines
                                 ],
                                 hide_index=True,
                             )
                             st.caption(
-                                f"Total {ui.md_cents(sum(ln.total_cents for ln in plan.lines))}"
+                                f"Total {fmt.md_cents(sum(ln.total_cents for ln in plan.lines))}"
                                 " = the full payment. Saves as a split set by hand."
                             )
                     elif plan.error is None:
@@ -394,11 +387,11 @@ with st.container(border=True):
                 conn, fake, None if purpose_id == NEW else purpose_id
             )
             if left_out:
-                who = ", ".join(f"{n} ({ui.format_percent(p)})" for n, p in left_out)
+                who = ", ".join(f"{n} ({fmt.percent(p)})" for n, p in left_out)
                 one = len(left_out) == 1
                 st.warning(
                     f"Needs review: {who} {'is' if one else 'are'} in the {purpose_label} default "
-                    f"split but not active in {ui.format_month(month)}. "
+                    f"split but not active in {fmt.month(month)}. "
                     f"{'Their share was' if one else 'Their shares were'} left out, so everyone "
                     "else's percent below is scaled up to cover the whole amount. Saving confirms "
                     "the split as shown; change the percents first if that isn't right."
@@ -428,8 +421,8 @@ with st.container(border=True):
                         [
                             {
                                 "Person": next(p["name"] for p in cand if p["id"] == pid),
-                                "%": ui.format_percent(splits.to_percents(weights)[pid]),
-                                "Share": ui.format_cents(shares[pid]),
+                                "%": fmt.percent(splits.to_percents(weights)[pid]),
+                                "Share": fmt.cents(shares[pid]),
                             }
                             for pid, w in weights
                         ],
@@ -493,7 +486,7 @@ def _after_change(message: str) -> None:
     ss["_cat_next"] = ids[pos + 1] if pos + 1 < len(ids) else (ids[pos - 1] if pos else None)
     if status == "All":
         ss["_cat_next"] = tid
-    ss["_cat_flash"] = message
+    ui.flash("categorize", message)
     ss["_cat_table_ver"] = ss.get("_cat_table_ver", 0) + 1
     st.rerun()
 
@@ -504,7 +497,7 @@ if clear:
 
 if recalc_confirm:
     try:
-        categorize.recalculate_rent(conn, tid, ss.get(f"{k}_recalc_vacant", []))
+        rent.recalculate(conn, tid, ss.get(f"{k}_recalc_vacant", []))
     except ValueError as exc:
         st.error(str(exc))
     else:

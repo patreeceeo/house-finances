@@ -1,6 +1,6 @@
 """Rooms and who was in them (data layer for the Rooms screen and rent split).
 
-See docs/rooms-spec.md. Each room carries a fixed percent of the rent; all
+Each room carries a fixed percent of the rent; all
 rooms together must total exactly 100% (checked like split percents, as the
 decimals entered). People are assigned to rooms for date ranges.
 
@@ -21,7 +21,6 @@ person to decide about, never filled in or scaled away.
 
 from __future__ import annotations
 
-import calendar
 import datetime as _dt
 import math
 import re
@@ -29,10 +28,9 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from housefin import db, splits
+from housefin import dates, db, fmt, splits
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 # Stand-in end for an ongoing assignment in comparisons ('YYYY-MM-DD' text
 # compares in date order).
 _FOREVER = "9999-12-31"
@@ -61,34 +59,11 @@ def check_date(value: str | None, *, label: str = "Date") -> str | None:
     return value
 
 
-def _day(value: str) -> _dt.date:
-    return _dt.date.fromisoformat(value)
-
-
-def _shift(value: str, days: int) -> str:
-    return (_day(value) + _dt.timedelta(days=days)).isoformat()
-
-
-def _nights(start: str, end: str) -> int:
-    """Number of nights from start to end, both inclusive."""
-    return (_day(end) - _day(start)).days + 1
-
-
-def month_bounds(month: str) -> tuple[str, str]:
-    """First and last date of a 'YYYY-MM' month."""
-    if not _MONTH_RE.match(str(month)):
-        raise RoomError(f"Month must look like YYYY-MM, not {month!r}.")
-    year, mon = map(int, month.split("-"))
-    last = calendar.monthrange(year, mon)[1]
-    return f"{month}-01", f"{month}-{last:02d}"
-
-
 def describe_span(start: str, end: str | None) -> str:
     """'2026-07-01 to 2026-07-31', '2026-07-01' (one night) or
     '2026-07-01 onwards (ongoing)', with dates in the browser's format."""
-    from housefin import ui
 
-    start, end = ui.format_date(start), None if end is None else ui.format_date(end)
+    start, end = fmt.date(start), None if end is None else fmt.date(end)
     if end is None:
         return f"{start} onwards (ongoing)"
     if end == start:
@@ -368,10 +343,10 @@ def _gaps(
         if e is not None and start is not None and e < start:
             continue
         if cursor is not None and s > cursor:
-            out.append((cursor, _shift(s, -1)))
+            out.append((cursor, dates.shift(s, -1)))
         if e is None:
             return out
-        cursor = max(cursor, _shift(e, 1)) if cursor else _shift(e, 1)
+        cursor = max(cursor, dates.shift(e, 1)) if cursor else dates.shift(e, 1)
     if cursor is not None and (end is None or cursor <= end):
         out.append((cursor, end))
     return out
@@ -438,14 +413,14 @@ def timeline(conn: sqlite3.Connection) -> list[dict]:
     (an assignment ending and the same person's next one in the same room
     starting the next night) get no row."""
     rows = conn.execute("SELECT start_date, end_date FROM room_assignments").fetchall()
-    dates = set()
+    changes = set()
     for r in rows:
-        dates.add(r["start_date"])
+        changes.add(r["start_date"])
         if r["end_date"] is not None:
-            dates.add(_shift(r["end_date"], 1))
+            changes.add(dates.shift(r["end_date"], 1))
     out: list[dict] = []
     previous = None
-    for d in sorted(dates):
+    for d in sorted(changes):
         state = occupants(conn, d)
         if state != previous:
             out.append({"date": d, "rooms": state})
@@ -466,7 +441,7 @@ class RoomMonth:
 
     @property
     def vacant_days(self) -> int:
-        return sum(_nights(s, e) for s, e in self.vacant)
+        return sum(dates.nights(s, e) for s, e in self.vacant)
 
 
 @dataclass
@@ -474,14 +449,6 @@ class MonthOccupancy:
     month: str  # 'YYYY-MM'
     days_in_month: int
     rooms: list[RoomMonth]
-
-    def person_days(self) -> dict[int, int]:
-        """Nights per person across all rooms."""
-        out: dict[int, int] = {}
-        for room in self.rooms:
-            for pid, n in room.days.items():
-                out[pid] = out.get(pid, 0) + n
-        return out
 
     @property
     def fully_occupied(self) -> bool:
@@ -493,7 +460,7 @@ def month_occupancy(conn: sqlite3.Connection, month: str) -> MonthOccupancy:
     person per room, and the vacant nights (as date ranges) per room. For
     every room, its people's nights plus its vacant nights equal the days in
     the month."""
-    first, last = month_bounds(month)
+    first, last = dates.month_bounds(month)
     rooms = []
     for room in list_rooms(conn):
         rm = RoomMonth(room["id"], room["name"], room["percent"])
@@ -506,7 +473,7 @@ def month_occupancy(conn: sqlite3.Connection, month: str) -> MonthOccupancy:
         for a in assigned:
             s = max(a["start_date"], first)
             e = min(a["end_date"] or _FOREVER, last)
-            rm.days[a["person_id"]] = rm.days.get(a["person_id"], 0) + _nights(s, e)
+            rm.days[a["person_id"]] = rm.days.get(a["person_id"], 0) + dates.nights(s, e)
         rm.vacant = _gaps([(a["start_date"], a["end_date"]) for a in assigned], first, last)
         rooms.append(rm)
-    return MonthOccupancy(month, _nights(first, last), rooms)
+    return MonthOccupancy(month, dates.nights(first, last), rooms)

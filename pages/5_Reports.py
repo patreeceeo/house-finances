@@ -5,7 +5,7 @@ from datetime import date
 
 import streamlit as st
 
-from housefin import db, reports, ui
+from housefin import db, fmt, reports, ui
 
 st.set_page_config(page_title="Reports · House Finances", layout="wide")
 conn = ui.get_conn()
@@ -36,7 +36,7 @@ if view == reports.MONTHLY_BY_PURPOSE:
         st.stop()
     n = len(period)
     span = ui.describe_months(months) if months else (
-        f"All time: {ui.format_month(period[0])} – {ui.format_month(period[-1])}")
+        f"All time: {fmt.month(period[0])} – {fmt.month(period[-1])}")
     st.caption(
         f"{span}. Average per month = total ÷ "
         f"{n} month{'s' if n != 1 else ''}; months with no spending on a purpose count as "
@@ -49,12 +49,12 @@ if view == reports.MONTHLY_BY_PURPOSE:
             "Averages that don't divide evenly are rounded to the nearest cent; "
             "monthly figures and totals are exact."
             + ("" if summed == total.average_cents else
-               f" So the rounded averages add up to {ui.md_cents(summed)}, while the Total "
-               f"row's average (its total ÷ {n}) is {ui.md_cents(total.average_cents)}.")
+               f" So the rounded averages add up to {fmt.md_cents(summed)}, while the Total "
+               f"row's average (its total ÷ {n}) is {fmt.md_cents(total.average_cents)}.")
         )
     if period[-1] >= date.today().strftime("%Y-%m"):
         st.warning(
-            f"{ui.format_month(period[-1])} isn't over yet, so it pulls the averages down. "
+            f"{fmt.month(period[-1])} isn't over yet, so it pulls the averages down. "
             "Pick months in the sidebar to leave it out."
         )
     money = st.column_config.NumberColumn(format="dollar")
@@ -97,7 +97,7 @@ st.dataframe(
     },
 )
 count, total = reports.grand_total(groups)
-st.write(f"**Total:** {ui.md_cents(total)} across {count:,} "
+st.write(f"**Total:** {fmt.md_cents(total)} across {count:,} "
          + ("shares" if view == reports.WITHDRAWALS_BY_PERSON else "transactions"))
 
 month_part = "-".join(months) if months else "all"
@@ -113,14 +113,14 @@ st.subheader("Transactions by group")
 value_label = "Share" if view == reports.WITHDRAWALS_BY_PERSON else (
     "In" if view == reports.DEPOSITS_BY_PERSON else "Out")
 for g in groups:
-    with st.expander(f"{g.name} · {g.count} · {ui.md_cents(g.total_cents)}"):
+    with st.expander(f"{g.name} · {g.count} · {fmt.md_cents(g.total_cents)}"):
         rows = [
             {
                 "Date": ui.to_dates([t["date"]])[0],
-                "Month": ui.format_month(t["month"]),
+                "Month": fmt.month(t["month"]),
                 "Description": t["description"],
-                "Amount": ui.format_cents(t["amount_cents"]),
-                value_label: ui.format_cents(t["value_cents"]),
+                "Amount": fmt.cents(t["amount_cents"]),
+                value_label: fmt.cents(t["value_cents"]),
             }
             for t in g.transactions
         ]

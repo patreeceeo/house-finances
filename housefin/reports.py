@@ -2,7 +2,7 @@
 
 Every view leaves out transactions whose purpose is excluded (the built-in
 Transfer). Months use the transaction month (applies_month override, else the
-month of the date) via :func:`housefin.ui.month_filter_sql`.
+month of the date) via :func:`housefin.dates.month_filter_sql`.
 
 Views
 -----
@@ -38,7 +38,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from fractions import Fraction
 
-from housefin import ui
+from housefin import dates, fmt
 
 DEPOSITS_BY_PERSON = "Deposits by person"
 WITHDRAWALS_BY_PURPOSE = "Withdrawals by purpose"
@@ -65,7 +65,7 @@ _IS_SPENDING = f"((t.amount_cents < 0 AND t.person_id IS NULL) OR {_IS_REFUND})"
 
 _TXN_COLS = (
     "t.id, t.date, t.description, t.amount_cents, t.applies_month, "
-    f"{ui.month_expr('t')} AS month"
+    f"{dates.month_sql('t')} AS month"
 )
 
 
@@ -112,7 +112,7 @@ def _finish(groups: dict, include_uncategorized: bool) -> list[Group]:
 def deposits_by_person(
     conn: sqlite3.Connection, months: list[str] | None = None, *, include_uncategorized: bool = True
 ) -> list[Group]:
-    where, params = ui.month_filter_sql(months, "t")
+    where, params = dates.month_filter_sql(months, "t")
     rows = conn.execute(
         f"SELECT {_TXN_COLS}, t.person_id, p.name AS person FROM transactions t"
         " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
@@ -134,7 +134,7 @@ def deposits_by_person(
 def withdrawals_by_purpose(
     conn: sqlite3.Connection, months: list[str] | None = None, *, include_uncategorized: bool = True
 ) -> list[Group]:
-    where, params = ui.month_filter_sql(months, "t")
+    where, params = dates.month_filter_sql(months, "t")
     rows = conn.execute(
         f"SELECT {_TXN_COLS}, t.purpose_id, pu.name AS purpose FROM transactions t"
         " LEFT JOIN purposes pu ON pu.id = t.purpose_id"
@@ -154,7 +154,7 @@ def withdrawals_by_purpose(
 def withdrawals_by_person(
     conn: sqlite3.Connection, months: list[str] | None = None, *, include_uncategorized: bool = True
 ) -> list[Group]:
-    where, params = ui.month_filter_sql(months, "t")
+    where, params = dates.month_filter_sql(months, "t")
     cond = f"{_IS_SPENDING} AND {_NOT_EXCLUDED} AND {where}"
     groups: dict = {}
     shares = conn.execute(
@@ -237,25 +237,16 @@ def round_cents(value: Fraction) -> int:
     return -cents if value < 0 else cents
 
 
-def _next_month(month: str) -> str:
-    y, m = map(int, month.split("-"))
-    return f"{y + m // 12}-{m % 12 + 1:02d}"
-
-
 def period_months(conn: sqlite3.Connection, months: list[str] | None) -> list[str]:
     """The months an average is taken over, oldest first: the selected months,
     or for All every month from the first to the last in the data (including
     months with no transactions at all)."""
     if months:
         return sorted(set(months))
-    present = ui.months_present(conn)
+    present = dates.months_present(conn)
     if not present:
         return []
-    out, m = [], present[-1]
-    while m <= present[0]:
-        out.append(m)
-        m = _next_month(m)
-    return out
+    return dates.month_span(present[-1], present[0])
 
 
 def monthly_by_purpose(
@@ -295,9 +286,9 @@ def monthly_table_rows(rows: list[MonthlyRow], period: list[str]) -> list[dict]:
     out = []
     for r in rows:
         row = {"Purpose": r.name}
-        row.update({ui.format_month(m): ui.cents_to_dollars(r.by_month[m]) for m in period})
-        row["Total ($)"] = ui.cents_to_dollars(r.total_cents)
-        row["Average / month ($)"] = ui.cents_to_dollars(r.average_cents)
+        row.update({fmt.month(m): fmt.dollars(r.by_month[m]) for m in period})
+        row["Total ($)"] = fmt.dollars(r.total_cents)
+        row["Average / month ($)"] = fmt.dollars(r.average_cents)
         out.append(row)
     return out
 
@@ -308,19 +299,12 @@ def monthly_csv(rows: list[MonthlyRow], period: list[str]) -> str:
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(["Purpose", *period, "Total", "Average per month"])
     for r in rows:
-        w.writerow([r.name, *(_dollars(r.by_month[m]) for m in period),
-                    _dollars(r.total_cents), _dollars(r.average_cents)])
+        w.writerow([r.name, *(fmt.csv_dollars(r.by_month[m]) for m in period),
+                    fmt.csv_dollars(r.total_cents), fmt.csv_dollars(r.average_cents)])
     return buf.getvalue()
 
 
 # --- table / CSV -------------------------------------------------------------
-
-
-def _dollars(cents: int) -> str:
-    """Plain decimal dollars for CSV: -123456 -> '-1234.56'."""
-    sign = "-" if cents < 0 else ""
-    d, c = divmod(abs(int(cents)), 100)
-    return f"{sign}{d}.{c:02d}"
 
 
 def table_columns(view: str) -> list[str]:
@@ -331,7 +315,7 @@ def table_rows(groups: list[Group], view: str) -> list[dict]:
     """The on-screen table: one row per group (totals in dollars as floats)."""
     label = TOTAL_LABELS[view]
     return [
-        {"Group": g.name, "Count": g.count, label: ui.cents_to_dollars(g.total_cents)}
+        {"Group": g.name, "Count": g.count, label: fmt.dollars(g.total_cents)}
         for g in groups
     ]
 
@@ -342,7 +326,7 @@ def to_csv(groups: list[Group], view: str) -> str:
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(table_columns(view))
     for g in groups:
-        w.writerow([g.name, g.count, _dollars(g.total_cents)])
+        w.writerow([g.name, g.count, fmt.csv_dollars(g.total_cents)])
     return buf.getvalue()
 
 

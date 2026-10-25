@@ -1,7 +1,7 @@
 """People: add, rename, colors, status, delete (data layer for the People screen).
 
 Months are 'YYYY-MM' text. Who is in the house comes from room assignments
-(housefin.rooms; see db.is_active / db.active_people): a person is in the
+(housefin.rooms; see db.in_house / db.people_in_house): a person is in the
 house for a month when assigned to any room on any night of it. The House is
 always present: it can be renamed but never assigned to a room or deleted.
 """
@@ -9,66 +9,12 @@ always present: it can be renamed but never assigned to a room or deleted.
 from __future__ import annotations
 
 import datetime as _dt
-import re
 import sqlite3
 
-from housefin import colors, db, rooms
-
-_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-
+from housefin import colors, dates, db, rooms
 
 class PersonError(ValueError):
     """A people change that is not allowed (message is user-facing)."""
-
-
-# --- months --------------------------------------------------------------------
-
-
-def check_month(month: str | None) -> str | None:
-    """Validate a 'YYYY-MM' month (None passes through)."""
-    if month is None:
-        return None
-    month = str(month).strip()
-    if not _MONTH_RE.match(month):
-        raise PersonError(f"Month must look like YYYY-MM, not {month!r}.")
-    return month
-
-
-def add_months(month: str, n: int) -> str:
-    year, mon = map(int, month.split("-"))
-    total = year * 12 + (mon - 1) + n
-    return f"{total // 12:04d}-{total % 12 + 1:02d}"
-
-
-def current_month(today: _dt.date | None = None) -> str:
-    today = today or _dt.date.today()
-    return f"{today.year:04d}-{today.month:02d}"
-
-
-def month_range(start: str, end: str) -> list[str]:
-    """Inclusive list of months from start to end (empty if start > end)."""
-    out, m = [], start
-    while m <= end:
-        out.append(m)
-        m = add_months(m, 1)
-    return out
-
-
-def month_choices(
-    conn: sqlite3.Connection, *, today: _dt.date | None = None, extra: tuple[str | None, ...] = ()
-) -> list[str]:
-    """Months to offer in pickers, newest first: from the earliest transaction
-    (or 24 months back) through 12 months ahead, plus any `extra` months."""
-    now = current_month(today)
-    start = add_months(now, -24)
-    first = conn.execute(
-        "SELECT MIN(COALESCE(applies_month, substr(date, 1, 7))) FROM transactions"
-    ).fetchone()[0]
-    if first and first < start:
-        start = first
-    months = set(month_range(start, add_months(now, 12)))
-    months.update(m for m in extra if m)
-    return sorted(months, reverse=True)
 
 
 # --- lookups -------------------------------------------------------------------
@@ -116,10 +62,6 @@ def delete_blocker(conn: sqlite3.Connection, person_id: int) -> str | None:
     if reasons:
         return f"{person['name']} has {' and '.join(reasons)}, so they cannot be deleted."
     return None
-
-
-def can_delete(conn: sqlite3.Connection, person_id: int) -> bool:
-    return delete_blocker(conn, person_id) is None
 
 
 # --- changes -------------------------------------------------------------------
@@ -205,7 +147,7 @@ def status(conn: sqlite3.Connection, person: sqlite3.Row | int, month: str) -> s
         person = get_person(conn, person)
     if person["is_house"]:
         return HOUSE
-    first, last = rooms.month_bounds(month)
+    first, last = dates.month_bounds(month)
     before, during, after = conn.execute(
         "SELECT COALESCE(SUM(start_date < :first), 0),"
         " COALESCE(SUM(start_date <= :last AND (end_date IS NULL OR end_date >= :first)), 0),"

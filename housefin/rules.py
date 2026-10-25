@@ -10,7 +10,7 @@ Rules never compute splits. Every function that changes rows returns an
 split layer so those rows get their purpose's default split (or, when the
 purpose became NULL, have their splits cleared).
 
-Matching (spec "Categorization and remembered rules"):
+Matching:
 
 - exact: description equals the pattern after whitespace collapse (case kept).
 - contains: pattern is a case-insensitive substring (both whitespace-collapsed).
@@ -80,9 +80,6 @@ class ApplyResult:
     updated: list[int] = field(default_factory=list)
     purpose_changed: list[int] = field(default_factory=list)
     cleared: list[int] = field(default_factory=list)
-
-    def __len__(self) -> int:
-        return len(self.updated)
 
     def extend(self, other: ApplyResult) -> None:
         for name in ("updated", "purpose_changed", "cleared"):
@@ -279,21 +276,7 @@ def delete_rule(conn: sqlite3.Connection, rule_id: int, *, reapply: bool = False
         return _reevaluate(conn, [old]) if reapply else ApplyResult()
 
 
-def reapply_rule(conn: sqlite3.Connection, rule_id: int) -> ApplyResult:
-    """Re-evaluate every non-manual row this rule matches."""
-    rule = get_rule(conn, rule_id)
-    if rule is None:
-        raise KeyError(rule_id)
-    return _reevaluate(conn, [rule])
-
-
 # --- applying ----------------------------------------------------------------
-
-
-def find_best_rule(
-    conn: sqlite3.Connection, description: str, amount_cents: int
-) -> Rule | None:
-    return best_rule(all_rules(conn), description, amount_cents)
 
 
 def apply_rules(
@@ -400,17 +383,13 @@ def preview_match_count(
 class RuleSummary:
     rule: Rule
     match_count: int  # rows of the rule's sign whose description it matches
-    target_name: str | None  # person or purpose name
 
 
 def list_rules(conn: sqlite3.Connection) -> list[RuleSummary]:
     """Every rule with its match count, newest first."""
     rows = conn.execute("SELECT description, amount_cents FROM transactions").fetchall()
-    people = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM people")}
-    purposes = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM purposes")}
     out = []
     for rule in sorted(all_rules(conn), key=lambda r: (r.created_at, r.id), reverse=True):
         count = sum(1 for row in rows if rule.matches(row["description"], row["amount_cents"]))
-        name = people.get(rule.person_id) if rule.person_id else purposes.get(rule.purpose_id)
-        out.append(RuleSummary(rule, count, name))
+        out.append(RuleSummary(rule, count))
     return out

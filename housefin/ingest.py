@@ -23,6 +23,7 @@ from typing import Iterable
 from . import db, rules, splits
 from .parsers import ParsedRow, ParseFormatError, RowError, detect_parser
 from .parsers.base import normalize_description
+from housefin import fmt
 
 IMPORTED = "imported"
 SKIPPED = "skipped"  # same file content imported before
@@ -50,7 +51,6 @@ class FileReport:
     rows_duplicate: int = 0
     bad_rows: list[RowError] = field(default_factory=list)
     auto_categorized: int = 0
-    splits_written: int = 0
     near_duplicates: list[NearDuplicate] = field(default_factory=list)
     new_ids: list[int] = field(default_factory=list)
 
@@ -174,7 +174,7 @@ def ingest_file(conn: sqlite3.Connection, path: str | Path) -> FileReport:
         with db.transaction(conn):
             new_ids, duplicates = _insert_rows(conn, result.rows, path.name)
             applied = rules.apply_rules(conn, new_ids)
-            report.splits_written = splits.sync_after_rules(conn, applied)
+            splits.sync_after_rules(conn, applied)
             report.near_duplicates = find_near_duplicates(conn, new_ids)
             conn.execute(
                 "INSERT INTO imports (file_name, file_hash, rows_read, rows_new, rows_duplicate)"
@@ -205,11 +205,6 @@ def all_failed(reports: list[FileReport]) -> bool:
 # --- formatting ------------------------------------------------------------------
 
 
-def format_cents(cents: int) -> str:
-    sign = "-" if cents < 0 else ""
-    return f"{sign}${abs(cents) // 100:,}.{abs(cents) % 100:02d}"
-
-
 def format_report(report: FileReport) -> str:
     name = Path(report.path).name
     if report.status == SKIPPED:
@@ -227,7 +222,7 @@ def format_report(report: FileReport) -> str:
         new = "; ".join(f'"{t}"' for t in nd.new_descriptions)
         other = "; ".join(f'"{t}"' for t in nd.other_descriptions)
         lines.append(
-            f"  warning: possible near-duplicate on {nd.date} for {format_cents(nd.amount_cents)}: "
+            f"  warning: possible near-duplicate on {nd.date} for {fmt.cents(nd.amount_cents)}: "
             f"{new} vs {other}"
         )
     return "\n".join(lines)

@@ -1,1 +1,1 @@
-"""House finances categorizer."""
+"""House Finances: shared house bank account, split between housemates."""

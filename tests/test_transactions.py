@@ -2,7 +2,7 @@
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import categorize as cat
 from housefin import db, rules, splits
@@ -39,7 +39,7 @@ def test_nested_calls_commit_only_at_outermost(tmp_path):
     before = seen()
     with db.transaction(conn):
         a = add_resident(conn, "Alice")  # its own db.transaction joins this one
-        splits.set_purpose_split(conn, db.get_purpose_id(conn, "Rent"), [(a, 1)])
+        splits.set_purpose_split(conn, purpose_id(conn, "Rent"), [(a, 1)])
         assert conn.in_transaction
         assert seen() == before  # nothing committed yet
     assert not conn.in_transaction
@@ -78,7 +78,7 @@ def test_categorize_save_failure_partway_leaves_db_unchanged(conn, monkeypatch):
     crash_after(monkeypatch, splits, "apply_default_split")
     with pytest.raises(RuntimeError):
         cat.save_withdrawal(
-            conn, tx["rent"], db.get_purpose_id(conn, "Rent"),
+            conn, tx["rent"], purpose_id(conn, "Rent"),
             [(people["Alice"], 1), (people["Bob"], 1)],
             remember_split=True, remember=True, applies_month="2026-03",
         )
@@ -97,7 +97,7 @@ def test_categorize_deposit_bad_month_keeps_old_tags(conn):
 @pytest.mark.parametrize("action", ["update", "delete"])
 def test_rule_reapply_failure_leaves_db_unchanged(conn, monkeypatch, action):
     fill(conn)
-    internet = db.get_purpose_id(conn, "Internet")
+    internet = purpose_id(conn, "Internet")
     rid, applied = rules.create_rule(
         conn, "COMCAST / XFINITY", "withdrawal", match_type=rules.CONTAINS, purpose_id=internet
     )
@@ -107,7 +107,7 @@ def test_rule_reapply_failure_leaves_db_unchanged(conn, monkeypatch, action):
     crash_after(monkeypatch, rules, "_retag")
     with pytest.raises(RuntimeError):
         if action == "update":
-            rules.update_rule(conn, rid, purpose_id=db.get_purpose_id(conn, "Other"), reapply=True)
+            rules.update_rule(conn, rid, purpose_id=purpose_id(conn, "Other"), reapply=True)
         else:
             rules.delete_rule(conn, rid, reapply=True)
     assert snapshot(conn) == before

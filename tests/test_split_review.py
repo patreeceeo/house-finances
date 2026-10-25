@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from helpers import add_resident
+from helpers import add_resident, purpose_id
 
 from housefin import balances
 from housefin import categorize as cat
@@ -40,7 +40,7 @@ def setup():
     ann = add_resident(conn, "Ann")
     bob = add_resident(conn, "Bob")
     moana = add_resident(conn, "Moana", "2026-07")
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     splits.set_purpose_split(conn, rent, [(ann, 40), (bob, 35), (moana, 25)])
     yield conn, ann, bob, moana, rent
     conn.close()
@@ -171,7 +171,7 @@ def app_db(monkeypatch, tmp_path):
     ann = add_resident(conn, "Ann")
     bob = add_resident(conn, "Bob")
     moana = add_resident(conn, "Moana", "2026-07")
-    rent = db.get_purpose_id(conn, "Water")
+    rent = purpose_id(conn, "Water")
     splits.set_purpose_split(conn, rent, [(ann, 40), (bob, 35), (moana, 25)])
     june = add_tx(conn, "2026-06-01", -100000, rent)
     splits.apply_default_split(conn, [june])
