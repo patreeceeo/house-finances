@@ -46,6 +46,12 @@ def format_cents(cents: int | None, *, symbol: str = "$") -> str:
     return f"{sign}{symbol}{dollars:,}.{rem:02d}"
 
 
+def md_cents(cents: int | None) -> str:
+    """format_cents for Streamlit markdown (st.warning, captions, labels...),
+    where two '$' in one string would otherwise be read as a math formula."""
+    return format_cents(cents).replace("$", "\\$")
+
+
 def format_percent(value: float) -> str:
     """A percent as entered, every digit kept: 12.125 -> '12.125%', 50.0 -> '50%'."""
     text = repr(float(value))

@@ -42,7 +42,7 @@ st.dataframe(
     },
 )
 count, total = reports.grand_total(groups)
-st.write(f"**Total:** {ui.format_cents(total)} across {count:,} "
+st.write(f"**Total:** {ui.md_cents(total)} across {count:,} "
          + ("shares" if view == reports.WITHDRAWALS_BY_PERSON else "transactions"))
 
 month_part = "-".join(months) if months else "all"
@@ -58,7 +58,7 @@ st.subheader("Transactions by group")
 value_label = "Share" if view == reports.WITHDRAWALS_BY_PERSON else (
     "In" if view == reports.DEPOSITS_BY_PERSON else "Out")
 for g in groups:
-    with st.expander(f"{g.name} · {g.count} · {ui.format_cents(g.total_cents)}"):
+    with st.expander(f"{g.name} · {g.count} · {ui.md_cents(g.total_cents)}"):
         rows = [
             {
                 "Date": ui.to_dates([t["date"]])[0],

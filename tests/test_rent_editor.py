@@ -241,7 +241,7 @@ def test_page_vacant_share_must_be_assigned(app_db):
     result = frames(at)[-1]
     house_row = result[result["Person"] == "House"].iloc[0]
     assert house_row["Vacant share"] == "$2,601.47" and house_row["Total"] == "$2,601.47"
-    assert any("Total $15,728.03 = the full payment" in c.value for c in at.caption)
+    assert any(r"Total \$15,728.03 = the full payment" in c.value for c in at.caption)
     at.button(key=f"{k}_save").click().run()
     assert not at.exception, at.exception
 

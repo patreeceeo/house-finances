@@ -272,9 +272,9 @@ def test_page_warning_names_rent_waiting_for_vacant_share(app_db):
     at = AppTest.from_file(str(ROOT / "pages/6_Balances.py"), default_timeout=30).run()
     assert not at.exception, at.exception
     text = " ".join(w.value for w in at.warning)
-    assert "2 withdrawals totalling $1,501.23" in text
-    assert "1 is uncategorized or has no split ($1.23)" in text
-    assert "1 is a rent payment ($1,500.00)" in text
+    assert r"2 withdrawals totalling \$1,501.23" in text
+    assert r"1 is uncategorized or has no split (\$1.23)" in text
+    assert r"1 is a rent payment (\$1,500.00)" in text
     assert "room was empty" in text and "who covers the empty room's share" in text
 
 

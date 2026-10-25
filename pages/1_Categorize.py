@@ -149,7 +149,7 @@ def pick_name(rows_, current_id, placeholder, new_label, *, key, extra_label=Non
 
 
 with st.container(border=True):
-    st.subheader(f"{ui.format_date(txn['date'])} · {ui.format_cents(amount)}")
+    st.subheader(f"{ui.format_date(txn['date'])} · {ui.md_cents(amount)}")
     st.code(txn["description"], language=None)
     source = {"rule": "tagged by a rule", "manual": "tagged by hand"}.get(
         txn["category_source"], "uncategorized"
@@ -286,7 +286,7 @@ with st.container(border=True):
                             cand = categorize.split_candidates(conn, month)
                             names = {p["id"]: p["name"] for p in cand}
                             st.multiselect(
-                                f"Vacant share ({ui.format_cents(rs.vacant_cents)}) goes to",
+                                f"Vacant share ({ui.md_cents(rs.vacant_cents)}) goes to",
                                 list(names), format_func=names.get,
                                 key=f"{k}_recalc_vacant",
                                 placeholder="Choose the House or people",
@@ -346,7 +346,7 @@ with st.container(border=True):
                     if plan.needs_vacant_choice:
                         st.warning(
                             "Needs review: " + "; ".join(rs.warnings()) + ". The vacant share "
-                            f"({ui.format_cents(rs.vacant_cents)}) is in nobody's split yet. "
+                            f"({ui.md_cents(rs.vacant_cents)}) is in nobody's split yet. "
                             "Choose who covers it before saving; nobody else's share is scaled up."
                         )
                         cand = categorize.split_candidates(
@@ -354,7 +354,7 @@ with st.container(border=True):
                         )
                         names = {p["id"]: p["name"] for p in cand}
                         st.multiselect(
-                            f"Vacant share ({ui.format_cents(rs.vacant_cents)}) goes to",
+                            f"Vacant share ({ui.md_cents(rs.vacant_cents)}) goes to",
                             list(names), format_func=names.get, key=f"{k}_vacant_{month}",
                             placeholder="Choose the House or people",
                             help="Several people split it evenly (whole cents; leftover "
@@ -373,7 +373,7 @@ with st.container(border=True):
                                 hide_index=True,
                             )
                             st.caption(
-                                f"Total {ui.format_cents(sum(ln.total_cents for ln in plan.lines))}"
+                                f"Total {ui.md_cents(sum(ln.total_cents for ln in plan.lines))}"
                                 " = the full payment. Saves as a split set by hand."
                             )
                     elif plan.error is None:

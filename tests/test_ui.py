@@ -215,3 +215,8 @@ def test_month_selector_widget(app_db, tmp_path):
     at.sidebar.radio[0].set_value("Months").run()
     at.sidebar.multiselect[0].select("2026-01").run()
     assert at.markdown[0].value == "sel=['2026-01']"
+
+
+def test_md_cents_escapes_dollar_for_markdown():
+    # Two unescaped '$' in one markdown string render as a math formula.
+    assert ui.md_cents(-1628633) == r"-\$16,286.33"

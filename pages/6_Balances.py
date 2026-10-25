@@ -29,13 +29,13 @@ if count:
         parts.append(
             f"{n_other} {'are' if n_other != 1 else 'is'} uncategorized or "
             f"{'have' if n_other != 1 else 'has'} no split "
-            f"({ui.format_cents(-(total - rent_total))}): categorize "
+            f"({ui.md_cents(-(total - rent_total))}): categorize "
             f"{'them' if n_other != 1 else 'it'} on the Categorize page."
         )
     if n_rent:
         parts.append(
             f"{n_rent} {'are rent payments' if n_rent != 1 else 'is a rent payment'} "
-            f"({ui.format_cents(-rent_total)}) for a month when a room was empty for "
+            f"({ui.md_cents(-rent_total)}) for a month when a room was empty for "
             "some nights (or the room percents need fixing), so nobody has said who "
             "covers the empty room's share yet. Review "
             f"{'them' if n_rent != 1 else 'it'} on the Categorize page "
@@ -43,7 +43,7 @@ if count:
         )
     st.warning(
         f"{count} withdrawal{'s' if count != 1 else ''} totalling "
-        f"{ui.format_cents(-total)} in the selected months "
+        f"{ui.md_cents(-total)} in the selected months "
         f"{'count' if count != 1 else 'counts'} toward no one's share yet. "
         + " ".join(parts)
     )
@@ -51,7 +51,7 @@ if count:
 count, total = balances.splits_pending_review(conn, months)
 if count:
     st.warning(
-        f"{count} split{'s' if count != 1 else ''} totalling {ui.format_cents(-total)} in the "
+        f"{count} split{'s' if count != 1 else ''} totalling {ui.md_cents(-total)} in the "
         "selected months left out someone who wasn't in the house that month, so everyone else's "
         "share was scaled up. Nobody has confirmed "
         f"{'them' if count != 1 else 'it'} yet: review on the Categorize page (Show: Needs review)."

@@ -211,5 +211,5 @@ def test_categorize_page_review_flow(app_db):
 
 def test_balances_page_warns(app_db):
     at = _page("6_Balances.py")
-    assert any("1 split totalling $1,000.00" in w.value and "Needs review" in w.value
+    assert any(r"1 split totalling \$1,000.00" in w.value and "Needs review" in w.value
                for w in at.warning)
