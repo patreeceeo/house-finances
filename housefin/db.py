@@ -200,6 +200,30 @@ CREATE TABLE IF NOT EXISTS old_active_months (
 );
 """
 
+# v7: kept match groups on Balances (housefin.matching). A group ties some of
+# one person's paid transactions to some of their share transactions; side
+# says which. The kept_* totals are recorded only to flag later changes. An
+# item's person_id is the group's, so the primary key lets each (person,
+# transaction, side) sit in at most one kept group.
+_MATCH_GROUPS_V7 = """
+CREATE TABLE IF NOT EXISTS match_groups (
+    id                INTEGER PRIMARY KEY,
+    person_id         INTEGER NOT NULL REFERENCES people (id),
+    note              TEXT,
+    kept_at           TEXT    NOT NULL DEFAULT (datetime('now')),
+    kept_paid_cents   INTEGER NOT NULL,
+    kept_share_cents  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS match_group_items (
+    group_id        INTEGER NOT NULL REFERENCES match_groups (id) ON DELETE CASCADE,
+    person_id       INTEGER NOT NULL REFERENCES people (id),
+    transaction_id  INTEGER NOT NULL REFERENCES transactions (id) ON DELETE CASCADE,
+    side            TEXT    NOT NULL CHECK (side IN ('paid', 'share')),
+    PRIMARY KEY (person_id, transaction_id, side)
+);
+CREATE INDEX IF NOT EXISTS match_group_items_group ON match_group_items (group_id);
+"""
+
 RENT = "Rent"
 
 
@@ -303,7 +327,7 @@ def _seed_rooms_v6(conn: sqlite3.Connection) -> None:
 # connection; either way it runs inside one transaction with its version bump.
 MIGRATIONS: list[str | Callable[[sqlite3.Connection], None]] = [
     _SCHEMA_V1, _SEED_INTEREST_RULE_V2, _SPLIT_SOURCE_V3, _SPLIT_LEFT_OUT_V4, _ROOMS_V5,
-    _seed_rooms_v6,
+    _seed_rooms_v6, _MATCH_GROUPS_V7,
 ]
 
 

@@ -16,6 +16,8 @@ TABLES = {
     "imports",
     "rooms",
     "room_assignments",
+    "match_groups",
+    "match_group_items",
 }
 
 
@@ -435,3 +437,101 @@ def test_v6_failure_rolls_back_with_version(tmp_path, monkeypatch):
     assert check.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
     assert "active_from" in {r[1] for r in check.execute("PRAGMA table_info(people)")}
     check.close()
+
+
+# --- v7: kept match groups ---------------------------------------------------------
+
+
+def _add_group(conn, pid, paid=1000, share=-1000):
+    return conn.execute(
+        "INSERT INTO match_groups (person_id, kept_paid_cents, kept_share_cents)"
+        " VALUES (?, ?, ?)", (pid, paid, share),
+    ).lastrowid
+
+
+def _add_item(conn, gid, pid, tid, side):
+    conn.execute(
+        "INSERT INTO match_group_items (group_id, person_id, transaction_id, side)"
+        " VALUES (?, ?, ?, ?)", (gid, pid, tid, side),
+    )
+
+
+def _items(conn):
+    return [tuple(r) for r in conn.execute(
+        "SELECT group_id, transaction_id, side FROM match_group_items ORDER BY 1, 2, 3"
+    )]
+
+
+def test_v7_match_groups_schema(conn):
+    assert db.schema_version(conn) == len(db.MIGRATIONS) >= 7
+    assert set(_columns(conn, "match_groups")) == {
+        "id", "person_id", "note", "kept_at", "kept_paid_cents", "kept_share_cents",
+    }
+    assert set(_columns(conn, "match_group_items")) == {
+        "group_id", "person_id", "transaction_id", "side",
+    }
+    gid = _add_group(conn, db.add_person(conn, "Ann"))
+    row = conn.execute("SELECT note, kept_at FROM match_groups WHERE id = ?", (gid,)).fetchone()
+    assert row["note"] is None and row["kept_at"]
+
+
+def test_v7_one_kept_group_per_item(conn):
+    ann, bob = db.add_person(conn, "Ann"), db.add_person(conn, "Bob")
+    tid = _add_txn(conn)
+    g1, g2 = _add_group(conn, ann), _add_group(conn, ann)
+    _add_item(conn, g1, ann, tid, "paid")
+    with pytest.raises(sqlite3.IntegrityError):
+        _add_item(conn, g2, ann, tid, "paid")
+    # The other side of the same transaction, or another person, is a different item.
+    _add_item(conn, g2, ann, tid, "share")
+    _add_item(conn, _add_group(conn, bob), bob, tid, "share")
+    assert len(_items(conn)) == 3
+
+
+def test_v7_side_and_references_checked(conn):
+    ann = db.add_person(conn, "Ann")
+    tid = _add_txn(conn)
+    gid = _add_group(conn, ann)
+    with pytest.raises(sqlite3.IntegrityError):
+        _add_item(conn, gid, ann, tid, "both")
+    with pytest.raises(sqlite3.IntegrityError):
+        _add_item(conn, gid, ann, 999, "paid")
+    with pytest.raises(sqlite3.IntegrityError):
+        _add_item(conn, 999, ann, tid, "paid")
+    with pytest.raises(sqlite3.IntegrityError):
+        _add_group(conn, 999)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO match_groups (person_id) VALUES (?)", (ann,))
+
+
+def test_v7_deleting_group_or_transaction_cascades(conn):
+    ann = db.add_person(conn, "Ann")
+    t1, t2, t3 = (_add_txn(conn, f"fp{i}") for i in range(3))
+    g1, g2 = _add_group(conn, ann), _add_group(conn, ann)
+    _add_item(conn, g1, ann, t1, "paid")
+    _add_item(conn, g1, ann, t2, "share")
+    _add_item(conn, g2, ann, t3, "paid")
+    _add_item(conn, g2, ann, t2, "paid")
+    conn.execute("DELETE FROM match_groups WHERE id = ?", (g1,))
+    assert _items(conn) == [(g2, t2, "paid"), (g2, t3, "paid")]
+    conn.execute("DELETE FROM transactions WHERE id = ?", (t2,))
+    assert _items(conn) == [(g2, t3, "paid")]
+    # The group itself stays; emptying it is the app's call.
+    conn.execute("DELETE FROM transactions WHERE id = ?", (t3,))
+    assert _items(conn) == []
+    assert conn.execute("SELECT COUNT(*) FROM match_groups").fetchone()[0] == 1
+
+
+def test_v7_migrates_existing_v6_db(tmp_path):
+    path = tmp_path / "v6.db"
+    raw = _old_db(path, 6)
+    assert not {"match_groups", "match_group_items"} & _tables(raw)
+    raw.execute("INSERT INTO people (name) VALUES ('Ann')")
+    raw.commit()
+    raw.close()
+    conn = db.connect(path)
+    assert db.schema_version(conn) == len(db.MIGRATIONS)
+    assert TABLES <= _tables(conn)
+    assert db.get_person_by_name(conn, "Ann")
+    assert conn.execute("SELECT COUNT(*) FROM match_groups").fetchone()[0] == 0
+    conn.close()
