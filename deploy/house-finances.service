@@ -1,0 +1,19 @@
+# /etc/systemd/system/house-finances.service
+[Unit]
+Description=House Finances (Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=housefin
+WorkingDirectory=/srv/house-finances
+EnvironmentFile=/etc/house-finances.env
+# 127.0.0.1 only: the Cloudflare Tunnel is the only way in.
+ExecStart=/usr/local/bin/uv run --frozen streamlit run app.py \
+    --server.address 127.0.0.1 --server.port 8501 --server.headless true \
+    --browser.gatherUsageStats false
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

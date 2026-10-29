@@ -78,6 +78,10 @@ st.dataframe(
     width="stretch",
 )
 
+if not ui.can_edit():
+    st.caption("View only: an editor can change or delete rules.")
+    st.stop()
+
 # --- edit ----------------------------------------------------------------------
 
 by_id = {s.rule.id: s.rule for s in summaries}

@@ -1,0 +1,11 @@
+# /etc/cloudflared/config.yml (see deploy/README.md for creating the tunnel)
+tunnel: house-finances
+credentials-file: /etc/cloudflared/house-finances.json
+
+ingress:
+  - hostname: money.example.com
+    service: http://127.0.0.1:8501
+  # Optional: SSH through the tunnel, behind its own Access application.
+  - hostname: ssh.example.com
+    service: ssh://127.0.0.1:22
+  - service: http_status:404

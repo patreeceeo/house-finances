@@ -31,6 +31,7 @@ from housefin import fmt, matching, ui
 from housefin.matching import Group, Item
 
 STALE = "The groups changed since the page was drawn; nothing was saved."
+VIEW_ONLY = "View only: an editor can change groups; nothing was saved."
 
 
 # --- serialization (no Streamlit) ----------------------------------------------------
@@ -158,12 +159,15 @@ def component_data(
     running_cents: int,
     locale: str | None = None,
     last_event: str | None = None,
+    read_only: bool = False,
 ) -> dict:
     """Everything the component shows, JSON-serializable. ``last_event`` is
     the id of the last edit handled, so the data changes (and the component
-    redraws and clears its busy state) even when an edit changed nothing."""
+    redraws and clears its busy state) even when an edit changed nothing.
+    ``read_only``: the groups are shown without edit controls (viewers)."""
     return {
         "person": person_id,
+        "read_only": read_only,
         "last_event": last_event,
         "name": name,
         "running": fmt.cents(running_cents),
@@ -182,11 +186,16 @@ def apply_edit(
     person_id: int,
     months: Sequence[str] | None,
     event: Mapping,
+    *,
+    can_edit: bool = True,
 ) -> str | None:
     """Apply one edit event from the component for the person and months the
     page was drawn with. Returns None when it was saved, else the message to
-    show (nothing was saved): :data:`STALE` when the groups or person have
-    changed since, or the refusal from housefin.matching."""
+    show (nothing was saved): :data:`VIEW_ONLY` for a viewer, :data:`STALE`
+    when the groups or person have changed since, or the refusal from
+    housefin.matching."""
+    if not can_edit:
+        return VIEW_ONLY
     if event.get("person") != person_id:
         return STALE
     action = event.get("action")
@@ -386,8 +395,10 @@ function itemRow(it, ui) {
   const sel = ui.selected.has(it.key);
   const what = esc(it.what) + (it.detail ? `<small>${esc(it.detail)}</small>` : "");
   const of = it.of ? `<small>${esc(it.of)}</small>` : "";
-  return `<div class="item${sel ? " sel" : ""}" draggable="true" data-item="${esc(it.key)}">
-    <input type="checkbox" ${sel ? "checked" : ""} aria-label="Select ${esc(it.what)} ${esc(it.date)}">
+  const pick = ui.readOnly ? ""
+    : `<input type="checkbox" ${sel ? "checked" : ""} aria-label="Select ${esc(it.what)} ${esc(it.date)}">`;
+  return `<div class="item${sel ? " sel" : ""}" draggable="${!ui.readOnly}" data-item="${esc(it.key)}">
+    ${pick}
     <span class="d">${esc(it.date)}</span>
     <span class="what">${what}</span>
     <span class="amt">${esc(it.amount)}${of}</span>
@@ -413,16 +424,17 @@ function groupHtml(g, ui) {
     </div>`;
   }
   const acts = [];
-  if (!g.kept || g.changed) acts.push(`<button type="button" class="link" data-act="keep">Keep</button>`);
-  if (g.multi_month) acts.push(`<button type="button" class="link" data-act="split">Split by month</button>`);
-  if (g.next) acts.push(`<button type="button" class="link" data-act="merge">Merge with next</button>`);
-  if (g.kept) acts.push(`<button type="button" class="link" data-act="unkeep">Back to suggestion</button>`);
+  const edit = !ui.readOnly;
+  if (edit && (!g.kept || g.changed)) acts.push(`<button type="button" class="link" data-act="keep">Keep</button>`);
+  if (edit && g.multi_month) acts.push(`<button type="button" class="link" data-act="split">Split by month</button>`);
+  if (edit && g.next) acts.push(`<button type="button" class="link" data-act="merge">Merge with next</button>`);
+  if (edit && g.kept) acts.push(`<button type="button" class="link" data-act="unkeep">Back to suggestion</button>`);
   if (g.diff_cents === 0 && !ui.showAll) acts.push(`<button type="button" class="link" data-act="fold">Fold</button>`);
   const flag = g.changed ? `<div class="flag">${esc(g.changed)}</div>` : "";
   const later = g.later ? `<div class="later">${esc(g.later)}</div>` : "";
-  const note = g.kept
-    ? `<div class="note-row"><span class="label">Note</span><input type="text" class="note" value="${esc(g.note)}" aria-label="Note for ${esc(g.title)}" placeholder="Why this group is off, or what it covers"></div>`
-    : "";
+  const note = !g.kept ? ""
+    : ui.readOnly ? (g.note ? `<div class="note-row"><span class="label">Note</span><span>${esc(g.note)}</span></div>` : "")
+    : `<div class="note-row"><span class="label">Note</span><input type="text" class="note" value="${esc(g.note)}" aria-label="Note for ${esc(g.title)}" placeholder="Why this group is off, or what it covers"></div>`;
   return `<div class="group ${esc(g.tone)}" data-key="${esc(g.key)}">
     <div class="g-head"><span class="g-title">${esc(g.title)}</span>${pill}<div class="g-actions">${acts.join("")}</div></div>
     ${flag}
@@ -449,6 +461,7 @@ export default function (component) {
     ui = { selected: new Set(), expanded: new Set(), showAll: false, seq: 0, drag: [] };
     UI.set(parentElement, ui);
   }
+  ui.readOnly = !!data.read_only;
   if (ui.person !== data.person) {
     ui.selected.clear();
     ui.expanded.clear();
@@ -489,6 +502,7 @@ export default function (component) {
     q(".head-paid").textContent = `${data.name}’s deposits`;
     q(".show-balanced").checked = ui.showAll;
     q(".keep-balanced").disabled = !data.can_keep_balanced;
+    q(".keep-balanced").hidden = ui.readOnly;
     q(".groups").innerHTML = groups.length
       ? groups.map((g) => groupHtml(g, ui)).join("")
       : '<div class="empty">No deposits or shares in this range.</div>';
@@ -519,7 +533,7 @@ export default function (component) {
     else if (act === "fold") { ui.expanded.delete(g.key); render(); }
     else {
       const row = e.target.closest(".item");
-      if (!row) return;
+      if (!row || ui.readOnly) return;
       const k = row.dataset.item;
       ui.selected.has(k) ? ui.selected.delete(k) : ui.selected.add(k);
       render();
@@ -619,7 +633,7 @@ def _edit_callback(
         event = state.get("edit")
         if not take_event(st.session_state, key, event):
             return
-        message = apply_edit(conn, person_id, months, event)
+        message = apply_edit(conn, person_id, months, event, can_edit=ui.can_edit())
         if message:
             ui.flash(key, message, "warning")
 
@@ -657,6 +671,7 @@ def show(
         data=component_data(
             person_id, name, groups, check.running_cents,
             last_event=st.session_state.get(f"_{key}_last_event"),
+            read_only=not ui.can_edit(),
         ),
         on_edit_change=_edit_callback(conn, person_id, months, key),
     )

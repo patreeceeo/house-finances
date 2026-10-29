@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "babel>=2.18.0",
+    "pyjwt[crypto]>=2.15.1",
     "streamlit",
 ]
 

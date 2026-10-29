@@ -84,6 +84,10 @@ notes = [f"**{k}**: {v}." for k, v in STATUS_HELP.items() if k in shown and k !=
 if notes:
     st.caption(" ".join(notes) + " Rooms and dates are set on the [Rooms page](Rooms).")
 
+if not ui.can_edit():
+    st.caption("View only: an editor can add, rename or delete people.")
+    st.stop()
+
 # --- add ---------------------------------------------------------------------------
 
 with st.form("add_person", clear_on_submit=True):

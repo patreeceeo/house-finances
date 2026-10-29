@@ -6,42 +6,96 @@ functions that need it, so the rest can be tested without it.
 from __future__ import annotations
 
 import datetime as _dt
-import os
 import sqlite3
 from pathlib import Path
 
-from housefin import dates, db, fmt
+from housefin import auth, dates, db, fmt
 
 ALL = "All"
 
 
 def db_path() -> Path:
-    """Database file: env HOUSEFIN_DB if set, else finances.db at the repo root."""
-    env = os.environ.get("HOUSEFIN_DB")
-    return Path(env) if env else db.DEFAULT_DB_PATH
+    """Database file: see :func:`housefin.db.db_path`."""
+    return db.db_path()
 
 
 def get_conn() -> sqlite3.Connection:
-    """One DB connection per browser session (Streamlit reruns reuse it)."""
+    """One DB connection per browser session (Streamlit reruns reuse it),
+    read-only for viewers. Every page calls this first, so it also signs the
+    session in (:func:`get_user`)."""
     import streamlit as st
 
+    user = get_user()
+    show_user(user)
     path = str(db_path())
     conn = st.session_state.get("_housefin_conn")
     if conn is None or st.session_state.get("_housefin_conn_path") != path:
-        conn = connect_threadsafe(path)
+        conn = connect_threadsafe(path, read_only=not user.can_edit)
         st.session_state["_housefin_conn"] = conn
         st.session_state["_housefin_conn_path"] = path
     return conn
 
 
-def connect_threadsafe(path: str | Path) -> sqlite3.Connection:
+def connect_threadsafe(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     """Like db.connect, but usable from the different threads Streamlit may run
-    a session's reruns on (only one rerun per session runs at a time)."""
+    a session's reruns on (only one rerun per session runs at a time).
+    ``read_only``: SQLite refuses every write on the connection."""
     db.connect(path).close()  # migrate + seed
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    if read_only:
+        conn.execute("PRAGMA query_only = ON")
     return conn
+
+
+# --- signed-in user ------------------------------------------------------------
+
+
+def get_user() -> auth.User:
+    """The session's user (see :mod:`housefin.auth`), checked once per browser
+    session. Without a valid sign-in the page stops with an error."""
+    import streamlit as st
+
+    user = st.session_state.get("_housefin_user")
+    if user is None:
+        try:
+            config = auth.access_config()
+            key = _signing_key(config) if config else None
+            user = auth.current_user(st.context.headers, signing_key=key)
+        except auth.AuthError as e:
+            st.error(f"Can't sign you in. {e}")
+            st.stop()
+        st.session_state["_housefin_user"] = user
+    return user
+
+
+def can_edit() -> bool:
+    """Whether this session's user may change data."""
+    return get_user().can_edit
+
+
+def show_user(user: auth.User) -> None:
+    """Who is signed in, in the sidebar (nothing for a local editor)."""
+    import streamlit as st
+
+    if user.email:
+        st.sidebar.caption(
+            f"Signed in as {user.email}" + ("" if user.can_edit else " (view only)")
+        )
+    elif not user.can_edit:
+        st.sidebar.caption("View only (HOUSEFIN_ROLE)")
+
+
+def _signing_key(config: auth.AccessConfig):
+    """Cloudflare's published keys, shared by all sessions."""
+    import streamlit as st
+
+    @st.cache_resource
+    def keys(team_domain: str, audience: str):
+        return auth.jwks_signing_key(auth.AccessConfig(team_domain, audience))
+
+    return keys(config.team_domain, config.audience)
 
 
 # --- messages after a rerun ---------------------------------------------------

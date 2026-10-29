@@ -126,6 +126,31 @@ is_deposit = amount > 0
 month = dates.month_of(txn)
 k = f"cat_{tid}"
 
+if not ui.can_edit():
+    # View only: the transaction's tags and stored split, no editor.
+    with st.container(border=True):
+        st.subheader(f"{fmt.date(txn['date'])} · {fmt.md_cents(amount)}")
+        st.code(txn["description"], language=None)
+        r = by_id[tid]
+        st.caption(
+            f"{txn['type']} · {tag_label(r) or 'uncategorized'}"
+            + (f" · applies to {fmt.month(txn['applies_month'])}" if txn["applies_month"] else "")
+        )
+        stored = splits.get_transaction_split(conn, tid)
+        if stored:
+            st.markdown("**Split**")
+            st.dataframe(
+                [{"Person": s["name"], "Share": fmt.cents(s["share_cents"])} for s in stored],
+                hide_index=True,
+            )
+        elif r["needs_review"]:
+            st.caption(
+                "No split yet: nobody has said who covers the vacant room's share, so this "
+                "payment counts toward no one's balance."
+            )
+        st.caption("View only: an editor can change tags and splits.")
+    st.stop()
+
 
 def pick_name(rows_, current_id, placeholder, new_label, *, key, extra_label=None):
     """Selectbox of ids plus NEW; returns the chosen id (or None/NEW)."""

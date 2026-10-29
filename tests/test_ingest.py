@@ -212,6 +212,18 @@ def test_cli_exit_codes(tmp_path, capsys):
     assert cli.main(["--db", str(dbfile), str(bad)]) == 1
 
 
+def test_cli_uses_housefin_db_like_the_app(tmp_path, capsys, monkeypatch):
+    app_db = tmp_path / "app.db"
+    monkeypatch.setenv("HOUSEFIN_DB", str(app_db))
+    good = write_csv(tmp_path, "good.csv", NEWER)
+    assert cli.main([str(good)]) == 0
+    assert count(db.connect(app_db)) == 3
+    # --db still wins.
+    other = tmp_path / "other.db"
+    assert cli.main(["--db", str(other), str(good)]) == 0
+    assert count(db.connect(other)) == 3
+
+
 def test_cli_without_paths_and_no_picker(tmp_path, capsys, monkeypatch):
     def unavailable():
         raise cli.PickerUnavailable("tkinter is not installed")

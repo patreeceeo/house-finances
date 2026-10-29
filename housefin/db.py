@@ -7,6 +7,7 @@ Booleans are stored as 0/1 integers.
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -15,6 +16,13 @@ from pathlib import Path
 from housefin import colors, dates
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "finances.db"
+
+
+def db_path() -> Path:
+    """The database the app and the importer use: env HOUSEFIN_DB if set,
+    else finances.db at the repo root."""
+    env = os.environ.get("HOUSEFIN_DB")
+    return Path(env) if env else DEFAULT_DB_PATH
 
 HOUSE_NAME = "House"
 TRANSFER = "Transfer"

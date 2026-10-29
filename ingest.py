@@ -106,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import bank CSV exports into the finances database.")
     parser.add_argument("files", nargs="*", help="CSV files to import (omit to pick in a file browser)")
     parser.add_argument(
-        "--db", default=str(db.DEFAULT_DB_PATH), help="database file (default: %(default)s)"
+        "--db", default=str(db.db_path()),
+        help="database file (default: HOUSEFIN_DB if set, else finances.db in the project folder)",
     )
     args = parser.parse_args(argv)
 

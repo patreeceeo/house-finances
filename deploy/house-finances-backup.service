@@ -1,0 +1,9 @@
+# /etc/systemd/system/house-finances-backup.service
+[Unit]
+Description=Back up the House Finances database
+
+[Service]
+Type=oneshot
+User=housefin
+EnvironmentFile=/etc/house-finances.env
+ExecStart=/srv/house-finances/deploy/backup.sh

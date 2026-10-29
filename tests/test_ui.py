@@ -46,6 +46,7 @@ def test_db_path_env(monkeypatch, tmp_path):
     assert ui.db_path() == db.DEFAULT_DB_PATH
     monkeypatch.setenv("HOUSEFIN_DB", str(tmp_path / "x.db"))
     assert ui.db_path() == tmp_path / "x.db"
+    assert db.db_path() == tmp_path / "x.db"
 
 
 def test_connect_threadsafe(tmp_path):
@@ -66,7 +67,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PAGES = ["app.py"] + [
     f"pages/{p}.py"
-    for p in ("1_Categorize", "2_Rules", "3_People", "4_Purposes", "5_Reports", "6_Balances", "7_Rooms")
+    for p in ("0_Import", "1_Categorize", "2_Rules", "3_People", "4_Purposes", "5_Reports", "6_Balances", "7_Rooms")
 ]
 
 
@@ -97,6 +98,28 @@ def test_pages_render(app_db, page):
     assert not at.exception, at.exception
 
 
+@pytest.mark.parametrize("page", PAGES)
+def test_pages_render_for_a_viewer(app_db, page, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("HOUSEFIN_ROLE", "viewer")
+    at = AppTest.from_file(str(ROOT / page), default_timeout=30).run()
+    assert not at.exception, at.exception
+    assert any("View only" in c.value for c in at.sidebar.caption)
+    assert not at.button  # no edit controls
+
+
+def test_hosted_page_without_sign_in_stops(app_db, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("HOUSEFIN_ACCESS_TEAM_DOMAIN", "myhouse.cloudflareaccess.com")
+    monkeypatch.setenv("HOUSEFIN_ACCESS_AUD", "aud")
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=30).run()
+    assert not at.exception, at.exception
+    assert "No sign-in token" in at.error[0].value
+    assert not at.title  # nothing of the page shown
+
+
 def test_home_shows_counts(app_db):
     from streamlit.testing.v1 import AppTest
 
@@ -123,3 +146,21 @@ def test_month_selector_widget(app_db, tmp_path):
     at.sidebar.radio[0].set_value("Months").run()
     at.sidebar.multiselect[0].select("2026-01").run()
     assert at.markdown[0].value == "sel=['2026-01']"
+
+def test_read_only_connection_refuses_writes(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "ro.db"
+    ui.connect_threadsafe(path).close()
+    conn = ui.connect_threadsafe(path, read_only=True)
+    assert conn.execute("SELECT name FROM people").fetchone()["name"] == db.HOUSE_NAME
+    for sql in (
+        "INSERT INTO people (name) VALUES ('Lee')",
+        "UPDATE people SET name = 'Lee'",
+        "DELETE FROM people",
+    ):
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute(sql)
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        with db.transaction(conn):
+            db.add_person(conn, "Lee")

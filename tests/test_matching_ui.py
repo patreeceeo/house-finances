@@ -176,6 +176,16 @@ def test_apply_keep_and_unkeep(conn, house):
     assert not _groups(conn, h)[0].kept
 
 
+def test_viewer_edits_are_refused(conn, house):
+    h = house
+    jan = _groups(conn, h)[0]
+    ev = _event(person=h["ann"], action="keep", group=jan.key)
+    assert mu.apply_edit(conn, h["ann"], None, ev, can_edit=False) == mu.VIEW_ONLY
+    assert not _groups(conn, h)[0].kept
+    data = mu.component_data(h["ann"], "Ann", _groups(conn, h), 0, read_only=True)
+    assert data["read_only"] is True
+
+
 def test_apply_keep_all_balanced(conn, house):
     h = house
     assert mu.apply_edit(conn, h["ann"], None,

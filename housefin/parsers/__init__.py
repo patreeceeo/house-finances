@@ -23,13 +23,18 @@ PARSERS: list[Parser] = [AllyParser()]
 def detect_parser(path: str | Path) -> Parser:
     """Pick the parser whose ``detect`` accepts the file's header row."""
     with open(path, encoding="utf-8-sig", newline="") as f:
-        header = next(csv.reader(f), None)
+        return detect_parser_text(path, f.read())
+
+
+def detect_parser_text(name: str | Path, text: str) -> Parser:
+    """:func:`detect_parser` for a file's text (``name`` is for messages)."""
+    header = next(csv.reader(text.splitlines()), None)
     if header is None:
-        raise ParseFormatError(f"{path}: empty file")
+        raise ParseFormatError(f"{name}: empty file")
     for p in PARSERS:
         if p.detect(header):
             return p
-    raise ParseFormatError(f"{path}: unrecognized CSV header {header!r}")
+    raise ParseFormatError(f"{name}: unrecognized CSV header {header!r}")
 
 
 def parse_file(path: str | Path) -> ParseResult:
@@ -46,6 +51,7 @@ __all__ = [
     "Parser",
     "RowError",
     "detect_parser",
+    "detect_parser_text",
     "fingerprint",
     "normalize_description",
     "parse_file",

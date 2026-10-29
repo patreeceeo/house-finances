@@ -68,11 +68,13 @@ def _clear_split(pid: int, name: str) -> None:
 
 
 ui.show_flash("purposes")
+can_edit = ui.can_edit()
 
-with st.form("add_purpose", clear_on_submit=False, border=False):
-    c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
-    c1.text_input("New purpose", key="purpose_new_name", placeholder="e.g. Gas")
-    c2.form_submit_button("Add purpose", on_click=_add, width="stretch")
+if can_edit:
+    with st.form("add_purpose", clear_on_submit=False, border=False):
+        c1, c2 = st.columns([4, 1], vertical_alignment="bottom")
+        c1.text_input("New purpose", key="purpose_new_name", placeholder="e.g. Gas")
+        c2.form_submit_button("Add purpose", on_click=_add, width="stretch")
 
 people = {p["id"]: p for p in db.list_people(conn)}
 candidates = purposes.split_candidates(conn)
@@ -90,6 +92,7 @@ def _summary(stored: list[tuple[int, float]]) -> str:
     )
 
 
+view_only: list[str] = []  # viewers get the summaries as a list
 for p in purposes.list_with_usage(conn):
     pid, name = p["id"], p["name"]
     stored = [] if p["excluded"] else splits.get_purpose_split(conn, pid)
@@ -101,6 +104,9 @@ for p in purposes.list_with_usage(conn):
     else:
         summary = f"default: {_summary(stored)}"
     label = f"**{name}** — {summary}"
+    if not can_edit:
+        view_only.append(f"- {label}")
+        continue
     # Keyed + stateful so it stays open when its label (the summary) changes.
     with st.expander(label, key=f"purpose_exp_{pid}", on_change="rerun"):
         if p["protected"]:
@@ -181,3 +187,7 @@ for p in purposes.list_with_usage(conn):
             "Use even split", key=f"purpose_clear_{pid}", on_click=_clear_split,
             args=(pid, name), disabled=not stored, width="stretch",
         )
+
+if not can_edit:
+    st.markdown("\n".join(view_only))
+    st.caption("View only: an editor can add purposes and change their default splits.")

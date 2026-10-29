@@ -28,6 +28,9 @@ def _ver(name: str) -> int:
 
 
 ui.show_flash("rooms")
+can_edit = ui.can_edit()
+if not can_edit:
+    st.caption("View only: an editor can change rooms, percents and who was in each room.")
 
 everyone = db.list_people(conn)
 people_by_name = {p["name"]: p["id"] for p in everyone}  # House refused by rooms.py
@@ -63,10 +66,10 @@ def _save_rooms(key: str) -> None:
 st.data_editor(
     pd.DataFrame(room_rows, columns=["id", ru.ROOM, ru.PERCENT, ru.NOW]),
     key=rooms_key,
-    num_rows="dynamic",
+    num_rows="dynamic" if can_edit else "fixed",
     hide_index=True,
     column_order=[ru.ROOM, ru.PERCENT, ru.NOW],
-    disabled=[ru.NOW],
+    disabled=[ru.NOW] if can_edit else True,
     column_config={
         ru.ROOM: st.column_config.TextColumn(ru.ROOM, required=True),
         ru.PERCENT: st.column_config.NumberColumn(
@@ -91,15 +94,16 @@ else:
 st.markdown(f"**Total: {ru.exact_total(percents)}%**")
 if total_error:
     st.warning(total_error)
-c1, c2, _ = st.columns([1, 1, 4])
-c1.button(
-    "Save rooms", key="rooms_save", type="primary", on_click=_save_rooms, args=(rooms_key,),
-    disabled=not ru.has_changes(room_changes) or bool(total_error), width="stretch",
-)
-c2.button(
-    "Discard changes", key="rooms_discard", on_click=_bump, args=("rooms",),
-    disabled=not ru.has_changes(room_changes), width="stretch",
-)
+if can_edit:
+    c1, c2, _ = st.columns([1, 1, 4])
+    c1.button(
+        "Save rooms", key="rooms_save", type="primary", on_click=_save_rooms, args=(rooms_key,),
+        disabled=not ru.has_changes(room_changes) or bool(total_error), width="stretch",
+    )
+    c2.button(
+        "Discard changes", key="rooms_discard", on_click=_bump, args=("rooms",),
+        disabled=not ru.has_changes(room_changes), width="stretch",
+    )
 
 # --- assignments per room ------------------------------------------------------------------
 
@@ -155,10 +159,10 @@ for room in all_rooms:
         st.data_editor(
             table,
             key=key,
-            num_rows="dynamic",
+            num_rows="dynamic" if can_edit else "fixed",
             hide_index=True,
             column_order=[ru.PERSON, ru.FIRST, ru.LAST, ru.STATUS],
-            disabled=[ru.STATUS],
+            disabled=[ru.STATUS] if can_edit else True,
             column_config={
                 ru.PERSON: st.column_config.MultiselectColumn(
                     ru.PERSON, options=chip_names, color=chip_colors, required=True,
@@ -173,22 +177,23 @@ for room in all_rooms:
             alt=f"Who was in {name}, newest first",
         )
         changes = ss.get(key)
-        b1, b2, b3, _ = st.columns([1, 1, 1, 2])
-        b1.button(
-            "Save", key=f"rooms_assign_save_{rid}", type="primary",
-            on_click=_save_assignments, args=(rid, key),
-            disabled=not ru.has_changes(changes), width="stretch",
-        )
-        b2.button(
-            "Discard changes", key=f"rooms_assign_discard_{rid}",
-            on_click=_discard_assignments, args=(rid,),
-            disabled=not ru.has_changes(changes), width="stretch",
-        )
-        b3.button(
-            f"Confirm seeded rows ({seeded})", key=f"rooms_confirm_{rid}",
-            on_click=_confirm, args=(rid, name), disabled=not seeded, width="stretch",
-            help="The seeded rows look right as they are.",
-        )
+        if can_edit:
+            b1, b2, b3, _ = st.columns([1, 1, 1, 2])
+            b1.button(
+                "Save", key=f"rooms_assign_save_{rid}", type="primary",
+                on_click=_save_assignments, args=(rid, key),
+                disabled=not ru.has_changes(changes), width="stretch",
+            )
+            b2.button(
+                "Discard changes", key=f"rooms_assign_discard_{rid}",
+                on_click=_discard_assignments, args=(rid,),
+                disabled=not ru.has_changes(changes), width="stretch",
+            )
+            b3.button(
+                f"Confirm seeded rows ({seeded})", key=f"rooms_confirm_{rid}",
+                on_click=_confirm, args=(rid, name), disabled=not seeded, width="stretch",
+                help="The seeded rows look right as they are.",
+            )
         gaps = ru.vacant_rows(conn, rid)
         if gaps:
             st.markdown(":gray[**Vacant** (worked out from the gaps, not editable)]")
@@ -248,7 +253,8 @@ if missing:
             old = "none set"
         with st.container(horizontal=True, vertical_alignment="center", key=f"rooms_missing_{p['id']}"):
             st.markdown(f"**{p['name']}** · old active months: {old}")
-            st.button(
-                "Dismiss", key=f"rooms_dismiss_{p['id']}", on_click=_dismiss,
-                args=(p["id"], p["name"]), help="Forget their old months; give them no room.",
-            )
+            if can_edit:
+                st.button(
+                    "Dismiss", key=f"rooms_dismiss_{p['id']}", on_click=_dismiss,
+                    args=(p["id"], p["name"]), help="Forget their old months; give them no room.",
+                )

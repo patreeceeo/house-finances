@@ -1,0 +1,10 @@
+# /etc/systemd/system/house-finances-backup.timer
+[Unit]
+Description=Nightly House Finances backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

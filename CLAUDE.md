@@ -90,6 +90,9 @@ the functions that need it.
 - Months and dates shown to people go through `housefin.fmt`, which follows
   the browser's locale. Month arithmetic and month SQL live in
   `housefin.dates`.
+- Anything that writes is for editors only: gate it on `ui.can_edit()`
+  (viewers' connections are read-only, so a missed control errors rather
+  than writes). Roles come from `housefin.auth`.
 - Group writes with `db.transaction`. Change the schema by appending to
   `db.MIGRATIONS`; never edit an existing migration.
 - Tests use in-memory or temp-dir databases; shared helpers are in

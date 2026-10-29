@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable
 
 from . import db, rules, splits
-from .parsers import ParsedRow, ParseFormatError, RowError, detect_parser
+from .parsers import ParsedRow, ParseFormatError, RowError, detect_parser_text
 from .parsers.base import normalize_description
 from housefin import fmt
 
@@ -139,12 +139,18 @@ def find_near_duplicates(conn: sqlite3.Connection, new_ids: Iterable[int]) -> li
 def ingest_file(conn: sqlite3.Connection, path: str | Path) -> FileReport:
     """Import one CSV. Never raises for bad input; see ``FileReport.status``."""
     path = Path(path)
-    report = FileReport(path=str(path))
     try:
         data = path.read_bytes()
     except OSError as e:
-        report.message = f"cannot read file: {e.strerror or e}"
-        return report
+        return FileReport(path=str(path), message=f"cannot read file: {e.strerror or e}")
+    return ingest_bytes(conn, path, data)
+
+
+def ingest_bytes(conn: sqlite3.Connection, path: str | Path, data: bytes) -> FileReport:
+    """Import one CSV's content, e.g. an upload; ``path`` names it (its file
+    name is stored with the import). Never raises for bad input."""
+    path = Path(path)
+    report = FileReport(path=str(path))
     report.file_hash = file_sha256(data)
 
     prev = previous_import(conn, report.file_hash)
@@ -157,7 +163,7 @@ def ingest_file(conn: sqlite3.Connection, path: str | Path) -> FileReport:
 
     try:
         text = data.decode("utf-8-sig")
-        result = detect_parser(path).parse_text(text)
+        result = detect_parser_text(path, text).parse_text(text)
     except UnicodeDecodeError as e:
         report.message = f"not UTF-8 text: {e}"
         return report

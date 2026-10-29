@@ -10,7 +10,7 @@ st.set_page_config(page_title="House Finances", page_icon=":house:", layout="wid
 conn = ui.get_conn()
 
 st.title("House Finances")
-st.caption(f"Database: `{ui.db_path()}` (all data stays on this machine)")
+st.caption(f"Database: `{ui.db_path()}`")
 
 stats = conn.execute(
     """
@@ -25,7 +25,7 @@ stats = conn.execute(
 imports = conn.execute("SELECT COUNT(*) FROM imports").fetchone()[0]
 
 if not stats["n"]:
-    st.info("No transactions yet. Import a bank CSV export to get started.")
+    st.info("No transactions yet. Import a bank CSV export on the [Import page](Import) to get started.")
 else:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Transactions", f"{stats['n']:,}")
@@ -38,13 +38,15 @@ else:
 
 st.subheader("Importing")
 st.markdown(
-    "Run the importer from a terminal in the project folder, then reload this page:\n\n"
+    "Upload the bank's CSV exports on the [Import page](Import), or run the importer "
+    "from a terminal in the project folder, then reload this page:\n\n"
     "```bash\nuv run python ingest.py path/to/transactions.csv\n```\n"
     "Re-importing an overlapping export is safe: transactions already stored are skipped."
 )
 
 st.subheader("Pages")
 st.markdown(
+    "- **Import**: upload bank CSV exports\n"
     "- **Categorize**: tag new transactions with a person or purpose\n"
     "- **Rules**: remembered descriptions and what they map to\n"
     "- **People**: housemates, their colors and whether they're in the house\n"

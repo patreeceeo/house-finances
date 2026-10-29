@@ -1,9 +1,10 @@
 # House Finances
 
-A local Streamlit app for a shared house bank account. It imports the bank's
+A Streamlit app for a shared house bank account. It imports the bank's
 CSV exports, tags each transaction with a person or a purpose, splits
 spending between housemates, and shows who has paid in more or less than
-their share. All data stays in a SQLite file on this machine.
+their share. All data is in one SQLite file. It runs locally, or on a small
+server behind Cloudflare Access (see [Hosting](#hosting)).
 
 ## Running it
 
@@ -16,10 +17,34 @@ uv run python ingest.py [exports.csv ...]   # import (no paths: a file picker op
 uv run pytest                               # tests
 ```
 
-The database is `finances.db` in the project root. The app uses the file
-named by the `HOUSEFIN_DB` environment variable instead if it is set; the
-importer takes `--db`. It is created and migrated on first use.
+The database is `finances.db` in the project root. The app and the importer
+use the file named by the `HOUSEFIN_DB` environment variable instead if it is
+set; the importer's `--db` overrides both. It is created and migrated on
+first use.
 Re-importing an overlapping export is safe: stored transactions are skipped.
+The Import page uploads exports from the browser and does the same.
+
+## Hosting
+
+Hosted, the app sits behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/),
+which signs people in, and Cloudflare Tunnel, which carries the traffic to
+the server so no port is open. Access decides who gets in; the app decides
+what they can do, from the email in Access's signed token
+(`housefin/auth.py`):
+
+| Variable | Meaning |
+|---|---|
+| `HOUSEFIN_ACCESS_TEAM_DOMAIN` | Your Access team domain, e.g. `myhouse.cloudflareaccess.com` |
+| `HOUSEFIN_ACCESS_AUD` | The Access application's AUD tag |
+| `HOUSEFIN_EDITORS` | Comma-separated emails that can change data; everyone else Access lets in can only look |
+| `HOUSEFIN_ROLE` | Without the two Access variables (local use): `editor` (default) or `viewer` |
+
+With both Access variables set, a request without a valid token is refused.
+Viewers' database connections are read-only, and pages hide their edit
+controls from them. Run Streamlit on `127.0.0.1` so only the tunnel reaches
+it.
+
+Step-by-step server setup, backups and updates: [deploy/README.md](deploy/README.md).
 
 ## How the money works
 
@@ -90,12 +115,15 @@ cause it.
 | Path | What it holds |
 |---|---|
 | `app.py` | Home page: counts and how to import |
+| `pages/0_Import.py` | Upload bank CSV exports (editors) |
+| `deploy/` | Server setup: systemd units, tunnel config, backup script |
 | `ingest.py` | Command-line importer, with a file picker |
-| `pages/` | One Streamlit page per screen (Categorize, Rules, People, Purposes, Reports, Balances, Rooms) |
+| `pages/` | One Streamlit page per screen (Import, Categorize, Rules, People, Purposes, Reports, Balances, Rooms) |
 | `housefin/db.py` | Schema, migrations, seed data, basic lookups |
 | `housefin/dates.py` | Date and month arithmetic; the SQL for a transaction's month |
 | `housefin/fmt.py` | Money, percents, months and dates as text, in the browser's locale |
-| `housefin/ui.py` | Streamlit helpers: connection, month picker, messages, date columns |
+| `housefin/ui.py` | Streamlit helpers: sign-in, connection, month picker, messages, date columns |
+| `housefin/auth.py` | Who is signed in (Cloudflare Access token) and their role |
 | `housefin/parsers/` | Bank CSV formats (Ally) |
 | `housefin/ingest.py` | Import with deduplication and rules |
 | `housefin/rules.py` | Remembered rules and applying them |
