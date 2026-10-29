@@ -116,7 +116,8 @@ cause it.
 |---|---|
 | `app.py` | Home page: counts and how to import |
 | `pages/0_Import.py` | Upload bank CSV exports (editors) |
-| `deploy/` | Server setup: systemd units, tunnel config, backup script |
+| `deploy/` | Server setup: systemd units, tunnel config, backup and update scripts |
+| `.github/workflows/deploy.yml` | Tests every push; deploys `main` to the server |
 | `ingest.py` | Command-line importer, with a file picker |
 | `pages/` | One Streamlit page per screen (Import, Categorize, Rules, People, Purposes, Reports, Balances, Rooms) |
 | `housefin/db.py` | Schema, migrations, seed data, basic lookups |

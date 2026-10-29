@@ -16,6 +16,7 @@ Files here:
 | `house-finances.env.example` | `/etc/house-finances.env` (filled in) |
 | `cloudflared-config.yml` | `/etc/cloudflared/config.yml` (filled in) |
 | `backup.sh`, `house-finances-backup.service`, `house-finances-backup.timer` | backups (step 6) |
+| `house-finances-update` | `/usr/local/bin/` (Deploying from GitHub) |
 
 ## 1. Server
 
@@ -146,7 +147,69 @@ default path here anyway).
 
 ## Updating
 
+Pushes to `main` deploy themselves once the tests pass (next section). By
+hand, on the server:
+
 ```bash
-cd /srv/house-finances && sudo -u housefin git pull && sudo -u housefin uv sync --frozen
-sudo systemctl restart house-finances
+sudo /usr/local/bin/house-finances-update "$(git -C /srv/house-finances ls-remote origin main | cut -f1)"
 ```
+
+`house-finances-update` backs up the database, checks out the commit, runs
+`uv sync`, restarts the app and waits for it to answer.
+
+## Deploying from GitHub
+
+`.github/workflows/deploy.yml` runs the tests on every push and pull
+request. For a push to `main` it then SSHes into the server as a `deploy`
+user whose key can do one thing: run `house-finances-update` with the pushed
+commit. To roll back, revert the commit and push.
+
+### On the server (once)
+
+```bash
+# The update script, root-owned and outside the checkout, so a push can't
+# change what runs as root. Reinstall it by hand if deploy/house-finances-update changes.
+sudo install -m 755 -o root -g root deploy/house-finances-update /usr/local/bin/
+echo 'deploy ALL=(root) NOPASSWD: /usr/local/bin/house-finances-update' |
+    sudo tee /etc/sudoers.d/house-finances-deploy && sudo chmod 440 /etc/sudoers.d/house-finances-deploy
+sudo useradd --system --create-home --shell /bin/sh deploy
+
+# A key just for GitHub (keep the private half for the DEPLOY_SSH_KEY secret):
+ssh-keygen -t ed25519 -N '' -C github-deploy -f /tmp/github-deploy
+sudo install -d -m 700 -o deploy ~deploy/.ssh
+printf '%s %s\n' 'command="sudo /usr/local/bin/house-finances-update \"$SSH_ORIGINAL_COMMAND\"",restrict' \
+    "$(cat /tmp/github-deploy.pub)" | sudo install -m 600 -o deploy /dev/stdin ~deploy/.ssh/authorized_keys
+cat /tmp/github-deploy        # paste into DEPLOY_SSH_KEY, then:
+rm /tmp/github-deploy /tmp/github-deploy.pub
+```
+
+The repo is public, so the server fetches over HTTPS with no key.
+
+### Reaching SSH
+
+- **Port 22 open** (key-only): GitHub's runners come from changing
+  addresses, so the port has to be open to everyone. `DEPLOY_HOST` is the
+  server's IP or name.
+- **Through the tunnel** (port 22 closed): in Zero Trust, Access > Service
+  credentials > Service Tokens, create a token for GitHub. In the
+  `ssh.example.com` Access application, add a policy with action **Service
+  Auth** that includes that token. `DEPLOY_HOST` is `ssh.example.com`.
+
+### In GitHub
+
+Settings > Environments > New environment `production`. Under Deployment
+branches choose Selected branches and add `main`; optionally add yourself as
+a required reviewer to approve each deploy. Then add, in that environment:
+
+| Name | Kind | Value |
+|---|---|---|
+| `DEPLOY_SSH_KEY` | secret | The private key printed above (all of it, including the BEGIN/END lines) |
+| `DEPLOY_KNOWN_HOSTS` | secret | `<DEPLOY_HOST> <the server's host key>`: on the server, `echo "ssh.example.com $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"` |
+| `CF_ACCESS_CLIENT_ID` | secret | Tunnel only: the service token's Client ID |
+| `CF_ACCESS_CLIENT_SECRET` | secret | Tunnel only: the service token's Client Secret |
+| `DEPLOY_HOST` | variable | `ssh.example.com`, or the server's IP for port 22 |
+| `DEPLOY_USER` | variable | Optional; defaults to `deploy` |
+
+`DEPLOY_KNOWN_HOSTS` pins the server's identity, so the workflow refuses to
+talk to anything else. Leave the two `CF_ACCESS_*` secrets out when SSH is on
+port 22.

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Update the server to one commit: back up the database, check the commit
+# out, install its dependencies, restart and wait until the app answers.
+#
+# Installed root-owned at /usr/local/bin/house-finances-update (not run from
+# the checkout, so a push can't change what runs as root). The deploy user's
+# SSH key may run only this, through sudo; see deploy/README.md.
+set -euo pipefail
+
+sha="${1:-}"
+if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "usage: house-finances-update <full commit sha>" >&2
+    exit 2
+fi
+
+app=/srv/house-finances
+as_app() { sudo -u housefin -H "$@"; }
+cd "$app"
+
+as_app git fetch --quiet origin
+as_app git cat-file -e "$sha^{commit}" || { echo "unknown commit $sha" >&2; exit 1; }
+echo "Updating $(as_app git rev-parse --short HEAD) -> ${sha:0:7}"
+
+# Back up first: the new code may migrate the database.
+as_app bash -c "set -a; . /etc/house-finances.env; exec $app/deploy/backup.sh"
+
+as_app git checkout --quiet --detach "$sha"
+as_app /usr/local/bin/uv sync --frozen --quiet
+systemctl restart house-finances
+
+for _ in $(seq 30); do
+    if curl -fsS http://127.0.0.1:8501/_stcore/health >/dev/null 2>&1; then
+        echo "Deployed ${sha:0:7}."
+        exit 0
+    fi
+    sleep 1
+done
+echo "The app did not come back within 30 s; see: journalctl -u house-finances -n 50" >&2
+exit 1
